@@ -1,0 +1,3 @@
+[submodule "libs/IXWebSocket"]
+	path = libs/IXWebSocket
+	url = https://github.com/machinezone/IXWebSocket
