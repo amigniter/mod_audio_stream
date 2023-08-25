@@ -1,5 +1,6 @@
 #include <regex>
 #include <string>
+#include <cstring>
 #include "mod_audio_stream.h"
 #include <ixwebsocket/IXWebSocket.h>
 
