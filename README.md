@@ -10,8 +10,14 @@ A FreeSWITCH module that streams L16 audio from a channel to a websocket endpoin
 ## Installation
 
 ### Dependencies
-It requires `libfreeswitch-dev`, `libssl-dev` and `libspeexdsp-dev` on Debian/Ubuntu which are regular packages for Freeswitch installation.
+It requires `libfreeswitch-dev`, `libssl-dev`, `zlib1g-dev` and `libspeexdsp-dev` on Debian/Ubuntu which are regular packages for Freeswitch installation.
 ### Building
+After cloning please execute: **git submodule init** and **git submodule update** to initialize the submodule.
+#### Custom path
+If you built FreeSWITCH from source, eq. install dir is /usr/local/freeswitch, add path to pkgconfig:
+```
+export PKG_CONFIG_PATH=/usr/local/freeswitch/lib/pkgconfig
+```
 To build the module, from the cloned repository directory:
 ```
 mkdir build && cd build
