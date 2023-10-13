@@ -1,4 +1,3 @@
-#include <regex>
 #include <string>
 #include <cstring>
 #include "mod_audio_stream.h"
@@ -297,15 +296,51 @@ namespace {
 }
 
 extern "C" {
-    int validate_ws_uri(const char* url, char *wsUri) {
-        // Regular expression to match a WebSocket URL
-        std::regex regex("(wss?|ws)://[a-zA-Z0-9]+([\\-\\.]{1}[a-zA-Z0-9]+)*(:[0-9]+)?(/.*)?");
+    int validate_ws_uri(const char* url, char* wsUri) {
+        const char* scheme = nullptr;
+        const char* hostStart = nullptr;
+        const char* hostEnd = nullptr;
+        const char* portStart = nullptr;
 
-        if(std::regex_match(url, regex)) {
-            std::strncpy(wsUri, url, MAX_WS_URI);
-            return 1;
+        // Check scheme
+        if (strncmp(url, "ws://", 5) == 0) {
+            scheme = "ws";
+            hostStart = url + 5;
+        } else if (strncmp(url, "wss://", 6) == 0) {
+            scheme = "wss";
+            hostStart = url + 6;
+        } else {
+            return 0;
         }
-        return 0;
+
+        // Find host end or port start
+        hostEnd = hostStart;
+        while (*hostEnd && *hostEnd != ':' && *hostEnd != '/') {
+            if (!std::isalnum(*hostEnd) && *hostEnd != '-' && *hostEnd != '.') {
+                return 0;
+            }
+            ++hostEnd;
+        }
+
+        // Check if host is empty
+        if (hostStart == hostEnd) {
+            return 0;
+        }
+
+        // Check for port
+        if (*hostEnd == ':') {
+            portStart = hostEnd + 1;
+            while (*portStart && *portStart != '/') {
+                if (!std::isdigit(*portStart)) {
+                    return 0;
+                }
+                ++portStart;
+            }
+        }
+
+        // Copy valid URI to wsUri
+        std::strncpy(wsUri, url, MAX_WS_URI);
+        return 1;
     }
 
     switch_status_t is_valid_utf8(const char *str) {
