@@ -3,6 +3,7 @@
 
 #include <switch.h>
 #include <speex/speex_resampler.h>
+#include "buffer/ringbuffer.h"
 
 #define MY_BUG_NAME "audio_stream"
 #define MAX_SESSION_ID (256)
@@ -18,7 +19,7 @@ typedef void (*responseHandler_t)(switch_core_session_t* session, const char* ev
 
 struct private_data {
     switch_mutex_t *mutex;
-    switch_buffer_t *buffer;
+    //switch_buffer_t *buffer;
     char sessionId[MAX_SESSION_ID];
     SpeexResamplerState *resampler;
     responseHandler_t responseHandler;
@@ -28,6 +29,9 @@ struct private_data {
     int channels;
     int audio_paused:1;
     char initialMetadata[8192];
+    RingBuffer *buffer;
+    uint8_t *data;
+    int rtp_packets;
 };
 
 typedef struct private_data private_t;
