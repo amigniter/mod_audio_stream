@@ -1,20 +1,32 @@
-# mod_audio_stream
+# mod audio stream <sup>_Light_</sup>
 
 A FreeSWITCH module that streams L16 audio from a channel to a websocket endpoint. If websocket sends back responses (eg. JSON) it can be effectively used with ASR engines such as IBM Watson etc., or any other purpose you find applicable.
 
-#### About
+**Dedicated to all FreeSWITCH enthusiasts!**
 
-- The purpose of `mod_audio_stream` was to make a simple, less dependent but yet effective module to stream audio and receive responses from websocket server. It uses [ixwebsocket](https://machinezone.github.io/IXWebSocket/), c++ library for websocket protocol which is compiled as a static library.
-- This module was inspired by [mod_audio_fork](https://github.com/drachtio/drachtio-freeswitch-modules/tree/main/modules/mod_audio_fork).
+### Note
+- This branch is not an upgrade to the main repository; it's a whole new version designed for users seeking minimalism and high-performance audio streaming to websockets.
+- If the main repo is working fine for you there is no need to switch to `v2` unless you want to stream audio only, and need a really lightweight module for that. 
+
+### About
+
+- The purpose of `mod_audio_stream` was to make a simple, less dependent but yet effective module to stream audio and receive responses from websocket server. It uses [easywsclient](https://github.com/dhbaird/easywsclient), a very light c++ library for websocket protocol which is reworked to support TLS (**Mbed TLS**).
+- It doesn't support sending text. This version is crafted for simplicity and efficiency, focusing only on the essentials of audio streaming.
 
 ## Installation
 
 ### Dependencies
-It requires `libfreeswitch-dev`, `libssl-dev`, `zlib1g-dev` and `libspeexdsp-dev` on Debian/Ubuntu which are regular packages for Freeswitch installation.
+It requires `libfreeswitch-dev`, `libmbedtls-dev` and `libspeexdsp-dev`. On Debian and Ubuntu, you can install these dependencies using the following commands:
+
+```bash
+sudo apt-get install libfreeswitch-dev libmbedtls-dev libspeexdsp-dev
+```
+If you are using a different Linux distribution, you'll need to install the equivalent packages. The package names may vary depending on your distribution's package manager.
+
 ### Building
-After cloning please execute: **git submodule init** and **git submodule update** to initialize the submodule.
-#### Custom path
-If you built FreeSWITCH from source, eq. install dir is /usr/local/freeswitch, add path to pkgconfig:
+
+#### Custom Path
+If you've built the FreeSWITCH from source, eq. install dir is /usr/local/freeswitch, add path to pkgconfig:
 ```
 export PKG_CONFIG_PATH=/usr/local/freeswitch/lib/pkgconfig
 ```
@@ -31,21 +43,18 @@ The following channel variables can be used to fine tune websocket connection an
 
 | Variable | Description | Default |
 | --- | ----------- |  ---|
-| STREAM_MESSAGE_DEFLATE | true or 1, disables per message deflate | off |
-| STREAM_HEART_BEAT | number of seconds, interval to send the heart beat | off |
 | STREAM_SUPPRESS_LOG | true or 1, suppresses printing to log | off |
+| STREAM_BUFFER_SIZE | buffer duration in milliseconds, divisible by 20 | 20 |
 
-- Per message deflate compression option is enabled by default. It can lead to a very nice bandwidth savings. To disable it set the channel var to `true|1`.
-- Heart beat, sent every xx seconds when there is no traffic to make sure that load balancers do not kill an idle connection.
 - Suppress parameter is omitted by default(false). All the responses from websocket server will be printed to the log. Not to flood the log you can suppress it by setting the value to `true|1`. Events are fired still, it only affects printing to the log.
-
+- Buffer Size actually represents a duration of audio chunk sent to websocket. If you want to send e.g. 100ms audio packets to your ws endpoint you would set this variable to 100. If ommited, default packet size of 20ms will be sent as grabbed from the audio channel (which is default FreeSWITCH frame size)
 ## API
 
 ### Commands
 The freeswitch module exposes the following API commands:
 
 ```
-uuid_audio_stream <uuid> start <wss-url> <mix-type> <sampling-rate> <metadata>
+uuid_audio_stream <uuid> start <wss-url> <mix-type> <sampling-rate>
 ```
 Attaches a media bug and starts streaming audio (in L16 format) to the websocket server. FS default is 8k. If sampling-rate is other than 8k it will be resampled.
 - `uuid` - Freeswitch channel unique id
@@ -57,17 +66,11 @@ Attaches a media bug and starts streaming audio (in L16 format) to the websocket
 - `sampling-rate` - choice of
   - "8k" = 8000 Hz sample rate will be generated
   - "16k" = 16000 Hz sample rate will be generated
-- `metadata` - (optional) a valid `utf-8` text to send. It will be sent the first before audio streaming starts.
 
 ```
-uuid_audio_stream <uuid> send_text <metadata>
+uuid_audio_stream <uuid> stop
 ```
-Sends a text to the websocket server. Requires a valid `utf-8` text.
-
-```
-uuid_audio_stream <uuid> stop <metadata>
-```
-Stops audio stream and closes websocket connection. If _metadata_ is provided it will be sent before the connection is closed.
+Stops audio stream and closes websocket connection.
 
 ```
 uuid_audio_stream <uuid> pause
@@ -82,7 +85,6 @@ Resumes audio stream
 ## Events
 Module will generate the following event types:
 - `mod_audio_stream::json`
-- `mod_audio_stream::connect`
 - `mod_audio_stream::disconnect`
 - `mod_audio_stream::error`
 
@@ -92,17 +94,6 @@ Message received from websocket endpoint. Json expected, but it contains whateve
 **Name**: mod_audio_stream::json
 **Body**: WebSocket server response
 
-### connect
-Successfully connected to websocket server.
-#### Freeswitch event generated
-**Name**: mod_audio_stream::connect
-**Body**: JSON
-```json
-{
-	"status": "connected"
-}
-```
-
 ### disconnect
 Disconnected from websocket server.
 #### Freeswitch event generated
@@ -110,15 +101,9 @@ Disconnected from websocket server.
 **Body**: JSON
 ```json
 {
-	"status": "disconnected",
-	"message": {
-		"code": 1000,
-		"reason": "Normal closure"
-	}
+	"status": "disconnected"
 }
 ```
-- code: `<int>`
-- reason: `<string>`
 
 ### error
 There is an error with the connection. Multiple fields will be available on the event to describe the error.
@@ -129,14 +114,10 @@ There is an error with the connection. Multiple fields will be available on the 
 {
 	"status": "error",
 	"message": {
-		"retries": 1,
-		"error": "Expecting status 101 (Switching Protocol), got 403 status connecting to wss://localhost, HTTP Status line: HTTP/1.1 403 Forbidden\r\n",
-		"wait_time": 100,
-		"http_status": 403
+		"code": 1,
+		"error": "error description"
 	}
 }
 ```
-- retries: `<int>`
+- code: `<int>`
 - error: `<string>`
-- wait_time: `<int>`
-- http_status: `<int>`

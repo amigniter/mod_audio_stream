@@ -25,12 +25,16 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
 
     switch (type) {
         case SWITCH_ABC_TYPE_INIT:
+            {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Got SWITCH_ABC_TYPE_INIT.\n");
+                stream_connect(user_data);
+            }
             break;
 
         case SWITCH_ABC_TYPE_CLOSE:
             {
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Got SWITCH_ABC_TYPE_CLOSE.\n");
-                stream_session_cleanup(session, NULL, 1);
+                stream_session_cleanup(session, 1);
             }
             break;
 
@@ -49,8 +53,7 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
 static switch_status_t start_capture(switch_core_session_t *session,
                                      switch_media_bug_flag_t flags,
                                      char* wsUri,
-                                     int sampling,
-                                     char* metadata)
+                                     int sampling)
 {
     switch_channel_t *channel = switch_core_session_get_channel(session);
     switch_media_bug_t *bug;
@@ -74,7 +77,7 @@ static switch_status_t start_capture(switch_core_session_t *session,
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "calling stream_session_init.\n");
     if (SWITCH_STATUS_FALSE == stream_session_init(session, responseHandler, read_codec->implementation->actual_samples_per_second,
-                                                 wsUri, sampling, channels, metadata, &pUserData)) {
+                                                 wsUri, sampling, channels, &pUserData)) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing mod_audio_stream session.\n");
         return SWITCH_STATUS_FALSE;
     }
@@ -89,17 +92,11 @@ static switch_status_t start_capture(switch_core_session_t *session,
     return SWITCH_STATUS_SUCCESS;
 }
 
-static switch_status_t do_stop(switch_core_session_t *session, char* text)
+static switch_status_t do_stop(switch_core_session_t *session)
 {
     switch_status_t status = SWITCH_STATUS_SUCCESS;
-
-    if (text) {
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "mod_audio_stream: stop w/ final text %s\n", text);
-    }
-    else {
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "mod_audio_stream: stop\n");
-    }
-    status = stream_session_cleanup(session, text, 0);
+    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "mod_audio_stream: stop\n");
+    status = stream_session_cleanup(session, 0);
 
     return status;
 }
@@ -114,25 +111,10 @@ static switch_status_t do_pauseresume(switch_core_session_t *session, int pause)
     return status;
 }
 
-static switch_status_t send_text(switch_core_session_t *session, char* text) {
-    switch_status_t status = SWITCH_STATUS_FALSE;
-    switch_channel_t *channel = switch_core_session_get_channel(session);
-    switch_media_bug_t *bug = switch_channel_get_private(channel, MY_BUG_NAME);
-
-    if (bug) {
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "mod_audio_stream: sending text: %s.\n", text);
-        status = stream_session_send_text(session, text);
-    }
-    else {
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "mod_audio_stream: no bug, failed sending text: %s.\n", text);
-    }
-    return status;
-}
-
-#define STREAM_API_SYNTAX "<uuid> [start | stop | send_text | pause | resume | graceful-shutdown ] [wss-url | path] [mono | mixed | stereo] [8000 | 16000] [metadata]"
+#define STREAM_API_SYNTAX "<uuid> [start | stop | pause | resume] [wss-url | path] [mono | mixed | stereo] [8000 | 16000]"
 SWITCH_STANDARD_API(stream_function)
 {
-    char *mycmd = NULL, *argv[6] = { 0 };
+    char *mycmd = NULL, *argv[5] = { 0 };
     int argc = 0;
 
     switch_status_t status = SWITCH_STATUS_FALSE;
@@ -151,43 +133,17 @@ SWITCH_STANDARD_API(stream_function)
         switch_core_session_t *lsession = NULL;
         if ((lsession = switch_core_session_locate(argv[0]))) {
             if (!strcasecmp(argv[1], "stop")) {
-                if(argc > 2 && (is_valid_utf8(argv[2]) != SWITCH_STATUS_SUCCESS)) {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                                      "%s contains invalid utf8 characters\n", argv[2]);
-                    switch_core_session_rwunlock(lsession);
-                    goto done;
-                }
-                status = do_stop(lsession, argc > 2 ? argv[2] : NULL);
+                status = do_stop(lsession);
             } else if (!strcasecmp(argv[1], "pause")) {
                 status = do_pauseresume(lsession, 1);
             } else if (!strcasecmp(argv[1], "resume")) {
                 status = do_pauseresume(lsession, 0);
-            } else if (!strcasecmp(argv[1], "send_text")) {
-                if (argc < 3) {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                                      "send_text requires an argument specifying text to send\n");
-                    switch_core_session_rwunlock(lsession);
-                    goto done;
-                }
-                if(is_valid_utf8(argv[2]) != SWITCH_STATUS_SUCCESS) {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                                      "%s contains invalid utf8 characters\n", argv[2]);
-                    switch_core_session_rwunlock(lsession);
-                    goto done;
-                }
-                status = send_text(lsession, argv[2]);
             } else if (!strcasecmp(argv[1], "start")) {
                 //switch_channel_t *channel = switch_core_session_get_channel(lsession);
                 char wsUri[MAX_WS_URI];
                 int sampling = 8000;
                 switch_media_bug_flag_t flags = SMBF_READ_STREAM;
-                char *metadata = argc > 5 ? argv[5] : NULL;
-                if(metadata && (is_valid_utf8(argv[2]) != SWITCH_STATUS_SUCCESS)) {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                                      "%s contains invalid utf8 characters\n", argv[2]);
-                    switch_core_session_rwunlock(lsession);
-                    goto done;
-                }
+
                 if (0 == strcmp(argv[3], "mixed")) {
                     flags |= SMBF_WRITE_STREAM;
                 } else if (0 == strcmp(argv[3], "stereo")) {
@@ -213,7 +169,7 @@ SWITCH_STANDARD_API(stream_function)
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                                       "invalid sample rate: %s\n", argv[4]);
                 } else {
-                    status = start_capture(lsession, flags, wsUri, sampling, metadata);
+                    status = start_capture(lsession, flags, wsUri, sampling);
                 }
             } else {
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
@@ -248,14 +204,13 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
 
     /* create/register custom event message types */
     if (switch_event_reserve_subclass(EVENT_JSON) != SWITCH_STATUS_SUCCESS ||
-        switch_event_reserve_subclass(EVENT_CONNECT) != SWITCH_STATUS_SUCCESS ||
+        //switch_event_reserve_subclass(EVENT_CONNECT) != SWITCH_STATUS_SUCCESS ||
         switch_event_reserve_subclass(EVENT_ERROR) != SWITCH_STATUS_SUCCESS ||
         switch_event_reserve_subclass(EVENT_DISCONNECT) != SWITCH_STATUS_SUCCESS) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't register an event subclass for mod_audio_stream API.\n");
         return SWITCH_STATUS_TERM;
     }
     SWITCH_ADD_API(api_interface, "uuid_audio_stream", "audio_stream API", stream_function, STREAM_API_SYNTAX);
-    switch_console_set_complete("add uuid_audio_stream start wss-url metadata");
     switch_console_set_complete("add uuid_audio_stream start wss-url");
     switch_console_set_complete("add uuid_audio_stream stop");
 
@@ -271,7 +226,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_audio_stream_shutdown)
 {
     switch_event_free_subclass(EVENT_JSON);
-    switch_event_free_subclass(EVENT_CONNECT);
+    //switch_event_free_subclass(EVENT_CONNECT);
     switch_event_free_subclass(EVENT_DISCONNECT);
     switch_event_free_subclass(EVENT_ERROR);
 
