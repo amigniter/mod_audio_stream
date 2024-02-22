@@ -15,10 +15,17 @@ class AudioStreamer {
 public:
 
     AudioStreamer(const char* uuid, const char* wsUri, responseHandler_t callback, int deflate, int heart_beat, const char* initialMeta,
-                    bool globalTrace, bool suppressLog): m_sessionId(uuid), m_notify(callback), m_initial_meta(initialMeta),
-                                                            m_global_trace(globalTrace), m_suppress_log(suppressLog){
+                    bool globalTrace, bool suppressLog, const char* apiKey = nullptr): m_sessionId(uuid), m_notify(callback), m_initial_meta(initialMeta),
+                                                            m_global_trace(globalTrace), m_suppress_log(suppressLog), m_api_key(apiKey) {
 
-        webSocket.setUrl(wsUri);
+        ix::WebSocketHttpHeaders headers;
+        if (m_api_key) {
+            std::string authHeader = "Token ";
+            authHeader += m_api_key;
+            headers["Authorization"] = authHeader;
+        }
+
+        webSocket.setUrl(wsUri, headers);
 
         // Optional heart beat, sent every xx seconds when there is not any traffic
         // to make sure that load balancers do not kill an idle connection.
@@ -165,6 +172,7 @@ private:
     const char* m_initial_meta;
     bool m_suppress_log;
     bool m_global_trace;
+    const char* m_api_key;
 };
 
 
