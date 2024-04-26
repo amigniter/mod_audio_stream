@@ -15,8 +15,23 @@ class AudioStreamer {
 public:
 
     AudioStreamer(const char* uuid, const char* wsUri, responseHandler_t callback, int deflate, int heart_beat, const char* initialMeta,
-                    bool globalTrace, bool suppressLog): m_sessionId(uuid), m_notify(callback), m_initial_meta(initialMeta),
-                                                            m_global_trace(globalTrace), m_suppress_log(suppressLog){
+                    bool globalTrace, bool suppressLog, const char* extra_headers): m_sessionId(uuid), m_notify(callback), m_initial_meta(initialMeta),
+                                                            m_global_trace(globalTrace), m_suppress_log(suppressLog), m_extra_headers(extra_headers){
+
+        ix::WebSocketHttpHeaders headers;
+        if (m_extra_headers) {
+            cJSON *headers_json = cJSON_Parse(m_extra_headers);
+            if (headers_json) {
+                cJSON *iterator = headers_json->child;
+                while (iterator) {
+                    if (iterator->type == cJSON_String && iterator->valuestring != nullptr) {
+                        headers[iterator->string] = iterator->valuestring;
+                    }
+                    iterator = iterator->next;
+                }
+                cJSON_Delete(headers_json);
+            }
+        }
 
         webSocket.setUrl(wsUri);
 
@@ -28,6 +43,10 @@ public:
         // Per message deflate connection is enabled by default. You can tweak its parameters or disable it
         if(deflate)
             webSocket.disablePerMessageDeflate();
+
+        // Set extra headers if any
+        if(!headers.empty())
+            webSocket.setExtraHeaders(headers);
 
         // Setup a callback to be fired when a message or an event (open, close, error) is received
         webSocket.setOnMessageCallback([this](const ix::WebSocketMessagePtr& msg){
@@ -165,6 +184,7 @@ private:
     const char* m_initial_meta;
     bool m_suppress_log;
     bool m_global_trace;
+    const char* m_extra_headers;
 };
 
 
@@ -201,7 +221,7 @@ namespace {
 
     switch_status_t stream_data_init(private_t *tech_pvt, switch_core_session_t *session, char *wsUri,
                                      uint32_t sampling, int desiredSampling, int channels, char *metadata, responseHandler_t responseHandler,
-                                     int deflate, int heart_beat, bool globalTrace, bool suppressLog, int rtp_packets)
+                                     int deflate, int heart_beat, bool globalTrace, bool suppressLog, int rtp_packets, const char* extra_headers)
     {
         int err; //speex
 
@@ -222,7 +242,7 @@ namespace {
         //size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PERIOD * BUFFERED_SEC);
         size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * rtp_packets);
 
-        auto* as = new AudioStreamer(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat, metadata, globalTrace, suppressLog);
+        auto* as = new AudioStreamer(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat, metadata, globalTrace, suppressLog, extra_headers);
 
         tech_pvt->pAudioStreamer = static_cast<void *>(as);
 
@@ -416,6 +436,7 @@ extern "C" {
         bool globalTrace = false;
         bool suppressLog = false;
         const char* buffer_size;
+        const char* extra_headers;
         int rtp_packets = 1;
 
         switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -451,6 +472,8 @@ extern "C" {
             }
         }
 
+        extra_headers = switch_channel_get_variable(channel, "STREAM_EXTRA_HEADERS");
+
         // allocate per-session tech_pvt
         auto* tech_pvt = (private_t *) switch_core_session_alloc(session, sizeof(private_t));
 
@@ -459,7 +482,7 @@ extern "C" {
             return SWITCH_STATUS_FALSE;
         }
         if (SWITCH_STATUS_SUCCESS != stream_data_init(tech_pvt, session, wsUri, samples_per_second, sampling, channels, metadata, responseHandler, deflate, heart_beat,
-                                                        globalTrace, suppressLog, rtp_packets)) {
+                                                        globalTrace, suppressLog, rtp_packets, extra_headers)) {
             destroy_tech_pvt(tech_pvt);
             return SWITCH_STATUS_FALSE;
         }
