@@ -20,7 +20,7 @@ if(CMAKE_BUILD_TYPE MATCHES "Release")
     set_target_properties(ixwebsocket PROPERTIES LINK_FLAGS_RELEASE "-s -w") #-static-libgcc -static-libstdc++
 endif()
 
-add_library(mod_audio_stream SHARED mod_audio_stream.c mod_audio_stream.h audio_streamer_glue.h audio_streamer_glue.cpp buffer/ringbuffer.c)
+add_library(mod_audio_stream SHARED mod_audio_stream.c mod_audio_stream.h audio_streamer_glue.h audio_streamer_glue.cpp buffer/ringbuffer.c base64.cpp)
 
 set_property(TARGET mod_audio_stream PROPERTY POSITION_INDEPENDENT_CODE ON)
 
