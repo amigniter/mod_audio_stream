@@ -717,7 +717,7 @@ extern "C"
                         remaining = frame.datalen - available;
                     }
 
-                    if (ringBufferLen(tech_pvt->buffer) >= FRAME_SIZE_8000 * desiredSampling / 8000 * channels * BUFFERIZATION_INTERVAL_MS / 20)
+                    if (ringBufferLen(tech_pvt->buffer) >= FRAME_SIZE_8000 * tech_pvt->sampling / 8000 * tech_pvt->channels * BUFFERIZATION_INTERVAL_MS / 20)
                     {
                         size_t nFrames = ringBufferLen(tech_pvt->buffer);
                         uint8_t chunkPtr[nFrames];
