@@ -9,6 +9,11 @@
 #include <unordered_set>
 #include "base64.h"
 
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <iostream>
+
 #define FRAME_SIZE_8000 320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
 #define BUFFERIZATION_INTERVAL_MS 500
 
@@ -343,7 +348,7 @@ namespace
         return send;
     }
 
-    switch_status_t stream_data_init(private_t *tech_pvt, switch_core_session_t *session, char *wsUri,
+    switch_status_t stream_data_init(private_t *tech_pvt, switch_core_session_t *session, char *address, int port,
                                      uint32_t sampling, int desiredSampling, int channels, char *metadata, responseHandler_t responseHandler,
                                      int deflate, int heart_beat, bool globalTrace, bool suppressLog, int rtp_packets, const char *extra_headers)
     {
@@ -368,9 +373,16 @@ namespace
         // size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * rtp_packets);
         size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * BUFFERIZATION_INTERVAL_MS / 20);
 
-        auto *as = new AudioStreamer(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat, metadata, globalTrace, suppressLog, extra_headers);
-
-        tech_pvt->pAudioStreamer = static_cast<void *>(as);
+        if (strcmp(STREAM_TYPE, "TCP") == 0)
+        {
+            auto *tcpStreamer = new TcpStreamer(tech_pvt->sessionId, address, port, responseHandler);
+            tech_pvt->pAudioStreamer = static_cast<void *>(tcpStreamer);
+        }
+        else
+        {
+            auto *as = new AudioStreamer(tech_pvt->sessionId, address, responseHandler, deflate, heart_beat, metadata, globalTrace, suppressLog, extra_headers);
+            tech_pvt->pAudioStreamer = static_cast<void *>(as);
+        }
 
         switch_mutex_init(&tech_pvt->mutex, SWITCH_MUTEX_NESTED, pool);
 
@@ -450,6 +462,51 @@ namespace
 
 extern "C"
 {
+    int validate_address(const char *address, char *wsUri, char *tcpAddress, int *port)
+    {
+        const char *scheme = nullptr;
+        const char *hostStart = nullptr;
+        const char *hostEnd = nullptr;
+        const char *portStart = nullptr;
+
+        // Check scheme for WS
+        if (strncmp(address, "ws://", 5) == 0 || strncmp(address, "wss://", 6) == 0)
+        {
+            return validate_ws_uri(address, wsUri);
+        }
+        else
+        {
+            // Check for TCP
+            hostStart = address;
+            hostEnd = address;
+            while (*hostEnd && *hostEnd != ':')
+            {
+                if (!std::isalnum(*hostEnd) && *hostEnd != '-' && *hostEnd != '.')
+                {
+                    return 0;
+                }
+                ++hostEnd;
+            }
+            if (*hostEnd == ':')
+            {
+                portStart = hostEnd + 1;
+                while (*portStart && *portStart != '/')
+                {
+                    if (!std::isdigit(*portStart))
+                    {
+                        return 0;
+                    }
+                    ++portStart;
+                }
+                *port = atoi(hostEnd + 1);
+                std::strncpy(tcpAddress, address, hostEnd - hostStart);
+                tcpAddress[hostEnd - hostStart] = '\0';
+                return 0; // TCP
+            }
+            return 0; // Invalid address
+        }
+    }
+
     int validate_ws_uri(const char *url, char *wsUri)
     {
         const char *scheme = nullptr;
@@ -597,8 +654,8 @@ extern "C"
     switch_status_t stream_session_init(switch_core_session_t *session,
                                         responseHandler_t responseHandler,
                                         uint32_t samples_per_second,
-                                        char *wsUri,
-                                        int sampling,
+                                        char *address,
+                                        int port,
                                         int channels,
                                         char *metadata,
                                         void **ppUserData)
@@ -662,7 +719,7 @@ extern "C"
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "error allocating memory!\n");
             return SWITCH_STATUS_FALSE;
         }
-        if (SWITCH_STATUS_SUCCESS != stream_data_init(tech_pvt, session, wsUri, samples_per_second, sampling, channels, metadata, responseHandler, deflate, heart_beat,
+        if (SWITCH_STATUS_SUCCESS != stream_data_init(tech_pvt, session, address, port, samples_per_second, sampling, channels, metadata, responseHandler, deflate, heart_beat,
                                                       globalTrace, suppressLog, rtp_packets, extra_headers))
         {
             destroy_tech_pvt(tech_pvt);
@@ -771,3 +828,59 @@ extern "C"
         return SWITCH_STATUS_FALSE;
     }
 }
+
+class TcpStreamer
+{
+public:
+    TcpStreamer(const char *uuid, const char *address, int port, responseHandler_t callback) : m_sessionId(uuid), m_address(address), m_port(port), m_notify(callback), m_socket(-1)
+    {
+        m_socket = socket(AF_INET, SOCK_STREAM, 0);
+        if (m_socket == -1)
+        {
+        std:
+            cerr << "Could not create socket" << std::endl;
+        }
+
+        struct sockaddr_in server;
+        server.sin_addr.s_addr = inet_addr(address);
+        server.sin_family = AF_INET;
+        server.sin_port = htons(port);
+
+        if (connect(m_socket, (struct sockaddr *)&server, sizeof(server)) < 0)
+        {
+            std::cerr << "Connection failed" << std : endl;
+        }
+
+        if (m_notify)
+        {
+            m_notify(NULL, "connect", "{\"status\":\"connected\"}");
+        }
+    }
+
+    ~TcpStreamer()
+    {
+        if (m_socket != -1)
+        {
+            close(m_socket);
+        }
+    }
+
+    bool isConnected()
+    {
+        return m_socket != -1;
+    }
+
+    void writeBinary(uint8_t *buffer, size_t len)
+    {
+        if (this.isConnected())
+        {
+            send(m_socket, buffer, len, 0);
+        }
+    }
+
+private:
+    const char *m_address;
+    int m_port;
+    responseHandler_t m_notify;
+    int m_socket;
+};
