@@ -647,7 +647,7 @@ extern "C"
         }
         else
         {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "validate_address: it is not a WS address\n");
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: it is not a WS address\n");
             // Check for TCP
             hostStart = address;
             hostEnd = address;
@@ -673,10 +673,10 @@ extern "C"
                 *port = atoi(hostEnd + 1);
                 std::strncpy(tcpAddress, address, hostEnd - hostStart);
                 tcpAddress[hostEnd - hostStart] = '\0';
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "validate_address: it's a TCP address with port %s\n", port);
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: it's a TCP address with port %s\n", port);
                 return 0; // TCP
             }
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "validate_address: invalid address\n");
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: invalid address\n");
             return 0; // Invalid address
         }
     }
