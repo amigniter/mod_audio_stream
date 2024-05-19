@@ -640,6 +640,8 @@ extern "C"
         const char *hostEnd = nullptr;
         const char *portStart = nullptr;
 
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: start\n");
+
         // Check scheme for WS
         if (strncmp(address, "ws://", 5) == 0 || strncmp(address, "wss://", 6) == 0)
         {

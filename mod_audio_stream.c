@@ -278,6 +278,7 @@ SWITCH_STANDARD_API(stream_function)
                 }
                 else
                 {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "starting start_capture\n");
                     status = start_capture(lsession, flags, address, sampling, metadata);
                 }
             }
