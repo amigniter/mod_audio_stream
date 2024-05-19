@@ -656,6 +656,7 @@ extern "C"
                                         uint32_t samples_per_second,
                                         char *address,
                                         int port,
+                                        int sampling,
                                         int channels,
                                         char *metadata,
                                         void **ppUserData)
