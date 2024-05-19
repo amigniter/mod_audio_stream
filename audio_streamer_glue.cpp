@@ -819,6 +819,7 @@ extern "C"
 
     switch_bool_t stream_frame(switch_media_bug_t *bug)
     {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "stream_frame: trying to stream\n");
         auto *tech_pvt = (private_t *)switch_core_media_bug_get_user_data(bug);
         if (!tech_pvt || tech_pvt->audio_paused)
             return SWITCH_TRUE;
@@ -827,6 +828,7 @@ extern "C"
         {
             if (!tech_pvt->pAudioStreamer)
             {
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "stream_frame: no audio streamer\n");
                 switch_mutex_unlock(tech_pvt->mutex);
                 return SWITCH_TRUE;
             }
@@ -835,6 +837,7 @@ extern "C"
 
             if (!pAudioStreamer->isConnected())
             {
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "stream_frame: audio streamer is not connected\n");
                 switch_mutex_unlock(tech_pvt->mutex);
                 return SWITCH_TRUE;
             }
@@ -866,6 +869,7 @@ extern "C"
                         uint8_t chunkPtr[nFrames];
                         ringBufferGetMultiple(tech_pvt->buffer, chunkPtr, nFrames);
 
+                        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "stream_frame: writing binary\n");
                         pAudioStreamer->writeBinary(chunkPtr, nFrames);
                         ringBufferClear(tech_pvt->buffer);
                     }
