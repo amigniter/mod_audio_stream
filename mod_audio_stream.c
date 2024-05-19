@@ -266,7 +266,7 @@ SWITCH_STANDARD_API(stream_function)
                 {
                     sampling = atoi(argv[4]);
                 }
-                if (!validate_address(argv[2], address, address))
+                if (!validate_address(argv[2], address, address, 0))
                 {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "invalid address: %s\n", argv[2]);
                 }
