@@ -81,7 +81,7 @@ static switch_status_t start_capture(switch_core_session_t *session,
     char wsUri[MAX_WS_URI];
     char tcpAddress[MAX_WS_URI];
     int port = 0;
-    bool isWs = validate_address(address, wsUri, tcpAddress);
+    bool isWs = validate_address(address, wsUri, tcpAddress, port);
 
     if (isWs)
     {
