@@ -4,6 +4,7 @@
 
 int validate_ws_uri(const char *url, char *wsUri);
 int validate_address(const char *address, char *wsUri, char *tcpAddress, int *port);
+int return_port(const char *address);
 switch_status_t is_valid_utf8(const char *str);
 switch_status_t stream_session_send_text(switch_core_session_t *session, char *text);
 switch_status_t stream_session_pauseresume(switch_core_session_t *session, int pause);
