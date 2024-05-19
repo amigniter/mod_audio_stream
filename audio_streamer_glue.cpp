@@ -462,7 +462,7 @@ namespace
 
 extern "C"
 {
-    int validate_address(const char *address, char *wsUri, char *tcpAddress, int *port)
+    int validate_address(const char *address, char *wsUri, char *tcpAddress)
     {
         const char *scheme = nullptr;
         const char *hostStart = nullptr;

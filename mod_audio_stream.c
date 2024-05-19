@@ -80,8 +80,7 @@ static switch_status_t start_capture(switch_core_session_t *session,
 
     char wsUri[MAX_WS_URI];
     char tcpAddress[MAX_WS_URI];
-    int port = 0;
-    bool isWs = validate_address(address, wsUri, tcpAddress, &port);
+    bool isWs = validate_address(address, wsUri, tcpAddress);
 
     if (isWs)
     {
@@ -267,7 +266,7 @@ SWITCH_STANDARD_API(stream_function)
                 {
                     sampling = atoi(argv[4]);
                 }
-                if (!validate_address(argv[2], address))
+                if (!validate_address(argv[2], address, address))
                 {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "invalid address: %s\n", argv[2]);
                 }
