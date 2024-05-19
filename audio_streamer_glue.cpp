@@ -678,7 +678,8 @@ extern "C"
                     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: portStart increased and now = %s\n", portStart);
                 }
                 ++hostEnd;
-                *port = atoi(hostEnd);
+                // *port = atoi(hostEnd);
+                *port = hostEnd;
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: port is assigned\n");
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: port = %s\n", *port);
                 std::strncpy(tcpAddress, address, hostEnd - hostStart);
