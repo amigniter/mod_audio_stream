@@ -356,7 +356,7 @@ public:
 
     bool isConnected()
     {
-        return m_socket != -1;
+        return true;
     }
 
     void writeBinary(uint8_t *buffer, size_t len)
