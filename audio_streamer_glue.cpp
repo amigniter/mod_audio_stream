@@ -639,9 +639,12 @@ extern "C"
         const char *hostStart = nullptr;
         const char *hostEnd = nullptr;
         const char *portStart = nullptr;
+        int newPort = 0;
 
         hostStart = address;
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "return_port: hostStart = %s\n", hostStart);
         hostEnd = address;
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "return_port: hostEnd = %s\n", hostEnd);
         while (*hostEnd && *hostEnd != ':')
         {
             if (!std::isalnum(*hostEnd) && *hostEnd != '-' && *hostEnd != '.')
@@ -665,11 +668,9 @@ extern "C"
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "return_port: portStart increased and now = %s\n", portStart);
             }
             const char *portString = hostEnd + 1;
-            int newPort = atoi(portString);
-            return newPort;
+            newPort = atoi(portString);
         }
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: invalid address\n");
-        return 0; // Invalid address
+        return newPort;
     }
 
     int validate_address(const char *address, char *wsUri, char *tcpAddress, int *port) // Corrected port type
@@ -679,8 +680,6 @@ extern "C"
         const char *hostEnd = nullptr;
         const char *portStart = nullptr;
 
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: start\n");
-
         // Check scheme for WS
         if (strncmp(address, "ws://", 5) == 0 || strncmp(address, "wss://", 6) == 0)
         {
@@ -689,44 +688,7 @@ extern "C"
         else
         {
             switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: it is not a WS address\n");
-            // Check for TCP
-            hostStart = address;
-            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: hostStart = %s\n", hostStart);
-            hostEnd = address;
-            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: hostEnd = %s\n", hostEnd);
-            while (*hostEnd && *hostEnd != ':')
-            {
-                if (!std::isalnum(*hostEnd) && *hostEnd != '-' && *hostEnd != '.')
-                {
-                    return 0;
-                }
-                ++hostEnd;
-                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: hostEnd increased and now = %s\n", hostEnd);
-            }
-            if (*hostEnd == ':')
-            {
-                portStart = hostEnd + 1;
-                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: portStart  = %s\n", portStart);
-                while (*portStart && *portStart != '/')
-                {
-                    if (!std::isdigit(*portStart))
-                    {
-                        return 0;
-                    }
-                    ++portStart;
-                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: portStart increased and now = %s\n", portStart);
-                }
-                //
-                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: we will try to parse the port\n");
-                const char *portString = hostEnd + 1;
-                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: portString = %s\n", portString);
-
-                std::strncpy(tcpAddress, address, hostEnd - hostStart);
-                tcpAddress[hostEnd - hostStart] = '\0';
-                return 0; // TCP
-            }
-            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: invalid address\n");
-            return 0; // Invalid address
+            return 0;
         }
     }
 
