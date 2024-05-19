@@ -80,13 +80,14 @@ static switch_status_t start_capture(switch_core_session_t *session,
 
     char wsUri[MAX_WS_URI];
     char tcpAddress[MAX_WS_URI];
-    bool isWs = validate_address(address, wsUri, tcpAddress);
+    int port = 0;
+    bool isWs = validate_address(address, wsUri, tcpAddress, &port);
 
     if (isWs)
     {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "calling stream_session_init for WS.\n");
         if (SWITCH_STATUS_FALSE == stream_session_init(session, responseHandler, read_codec->implementation->actual_samples_per_second,
-                                                       wsUri, port, sampling, channels, metadata, &pUserData))
+                                                       wsUri, 0, sampling, channels, metadata, &pUserData, "WS"))
         {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing mod_audio_stream WS session.\n");
             return SWITCH_STATUS_FALSE;
@@ -96,7 +97,7 @@ static switch_status_t start_capture(switch_core_session_t *session,
     {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "calling stream_session_init for TCP.\n");
         if (SWITCH_STATUS_FALSE == stream_session_init(session, responseHandler, read_codec->implementation->actual_samples_per_second,
-                                                       tcpAddress, port, sampling, channels, metadata, &pUserData))
+                                                       tcpAddress, port, sampling, channels, metadata, &pUserData, "TCP"))
         {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing mod_audio_stream TCP session.\n");
             return SWITCH_STATUS_FALSE;
@@ -226,15 +227,14 @@ SWITCH_STANDARD_API(stream_function)
             else if (!strcasecmp(argv[1], "start"))
             {
                 // switch_channel_t *channel = switch_core_session_get_channel(lsession);
-                char wsUri[MAX_WS_URI];
                 char address[MAX_WS_URI];
                 int sampling = 8000;
                 switch_media_bug_flag_t flags = SMBF_READ_STREAM;
                 char *metadata = argc > 5 ? argv[5] : NULL;
-                if (metadata && (is_valid_utf8(argv[2]) != SWITCH_STATUS_SUCCESS))
+                if (metadata && (is_valid_utf8(metadata) != SWITCH_STATUS_SUCCESS))
                 {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                                      "%s contains invalid utf8 characters\n", argv[2]);
+                                      "%s contains invalid utf8 characters\n", metadata);
                     switch_core_session_rwunlock(lsession);
                     goto done;
                 }
@@ -266,22 +266,13 @@ SWITCH_STANDARD_API(stream_function)
                 {
                     sampling = atoi(argv[4]);
                 }
-                if (!validate_address(argv[2], address, address))
+                if (!validate_address(argv[2], address, address, &port))
                 {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "invalid address: %s\n", argv[2]);
                 }
                 else if (sampling % 8000 != 0)
                 {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "invalid sample rate: %s\n", argv[4]);
-                }
-                else
-                {
-                    status = start_capture(lsession, flags, address, sampling, metadata);
-                }
-                else if (sampling % 8000 != 0)
-                {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                                      "invalid sample rate: %s\n", argv[4]);
                 }
                 else
                 {
