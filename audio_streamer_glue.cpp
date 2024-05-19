@@ -636,6 +636,10 @@ extern "C"
 
     int return_port(const char *address)
     {
+        const char *hostStart = nullptr;
+        const char *hostEnd = nullptr;
+        const char *portStart = nullptr;
+
         hostStart = address;
         hostEnd = address;
         while (*hostEnd && *hostEnd != ':')
