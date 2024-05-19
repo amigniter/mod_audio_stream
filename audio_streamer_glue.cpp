@@ -683,7 +683,7 @@ extern "C"
                 const char *portString = hostEnd + 1;
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: portString = %s\n", portString);
                 int newPort = atoi(portString);
-                port = atoi(portString);
+                *port = newPort;
                 // *port = (int)strtol(hostEnd + 1, nullptr, 10);
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: port is assigned\n");
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: newPort = %i\n", newPort);
