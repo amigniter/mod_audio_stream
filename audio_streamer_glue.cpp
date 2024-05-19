@@ -682,9 +682,11 @@ extern "C"
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: we will try to parse the port\n");
                 const char *portString = hostEnd + 1;
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: portString = %s\n", portString);
-                *port = atoi(portString);
+                int newPort = atoi(portString);
+                // *port = atoi(portString);
                 // *port = (int)strtol(hostEnd + 1, nullptr, 10);
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: port is assigned\n");
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: newPort = %s\n", *newPort);
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: port = %s\n", *port);
                 std::strncpy(tcpAddress, address, hostEnd - hostStart);
                 tcpAddress[hostEnd - hostStart] = '\0';
