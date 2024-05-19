@@ -460,51 +460,6 @@ namespace
 
 extern "C"
 {
-    int validate_address(const char *address, char *wsUri, char *tcpAddress, int *port) // Corrected port type
-    {
-        const char *scheme = nullptr;
-        const char *hostStart = nullptr;
-        const char *hostEnd = nullptr;
-        const char *portStart = nullptr;
-
-        // Check scheme for WS
-        if (strncmp(address, "ws://", 5) == 0 || strncmp(address, "wss://", 6) == 0)
-        {
-            return validate_ws_uri(address, wsUri);
-        }
-        else
-        {
-            // Check for TCP
-            hostStart = address;
-            hostEnd = address;
-            while (*hostEnd && *hostEnd != ':')
-            {
-                if (!std::isalnum(*hostEnd) && *hostEnd != '-' && *hostEnd != '.')
-                {
-                    return 0;
-                }
-                ++hostEnd;
-            }
-            if (*hostEnd == ':')
-            {
-                portStart = hostEnd + 1;
-                while (*portStart && *portStart != '/')
-                {
-                    if (!std::isdigit(*portStart))
-                    {
-                        return 0;
-                    }
-                    ++portStart;
-                }
-                *port = atoi(hostEnd + 1);
-                std::strncpy(tcpAddress, address, hostEnd - hostStart);
-                tcpAddress[hostEnd - hostStart] = '\0';
-                return 0; // TCP
-            }
-            return 0; // Invalid address
-        }
-    }
-
     int validate_ws_uri(const char *url, char *wsUri)
     {
         const char *scheme = nullptr;
@@ -608,6 +563,51 @@ extern "C"
             }
         }
         return SWITCH_STATUS_SUCCESS;
+    }
+
+    int validate_address(const char *address, char *wsUri, char *tcpAddress, int *port) // Corrected port type
+    {
+        const char *scheme = nullptr;
+        const char *hostStart = nullptr;
+        const char *hostEnd = nullptr;
+        const char *portStart = nullptr;
+
+        // Check scheme for WS
+        if (strncmp(address, "ws://", 5) == 0 || strncmp(address, "wss://", 6) == 0)
+        {
+            return validate_ws_uri(address, wsUri);
+        }
+        else
+        {
+            // Check for TCP
+            hostStart = address;
+            hostEnd = address;
+            while (*hostEnd && *hostEnd != ':')
+            {
+                if (!std::isalnum(*hostEnd) && *hostEnd != '-' && *hostEnd != '.')
+                {
+                    return 0;
+                }
+                ++hostEnd;
+            }
+            if (*hostEnd == ':')
+            {
+                portStart = hostEnd + 1;
+                while (*portStart && *portStart != '/')
+                {
+                    if (!std::isdigit(*portStart))
+                    {
+                        return 0;
+                    }
+                    ++portStart;
+                }
+                *port = atoi(hostEnd + 1);
+                std::strncpy(tcpAddress, address, hostEnd - hostStart);
+                tcpAddress[hostEnd - hostStart] = '\0';
+                return 0; // TCP
+            }
+            return 0; // Invalid address
+        }
     }
 
     switch_status_t stream_session_send_text(switch_core_session_t *session, char *text)
