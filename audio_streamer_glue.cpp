@@ -335,6 +335,8 @@ public:
             return;
         }
 
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: connected..\n");
+
         if (m_notify)
         {
             m_notify(NULL, "connect", "{\"status\":\"connected\"}");
