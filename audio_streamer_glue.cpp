@@ -308,10 +308,14 @@ class TcpStreamer
 public:
     TcpStreamer(const char *uuid, const char *address, int port, responseHandler_t callback) : m_sessionId(uuid), m_address(address), m_port(port), m_notify(callback), m_socket(-1)
     {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Initializing TCP connection to %s:%d\n", address, port);
+
         m_socket = socket(AF_INET, SOCK_STREAM, 0);
         if (m_socket == -1)
         {
             std::cerr << "Could not create socket" << std::endl;
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "TcpStreamer: Could not create socket\n");
+            return;
         }
 
         struct sockaddr_in server;
@@ -322,12 +326,18 @@ public:
         if (connect(m_socket, (struct sockaddr *)&server, sizeof(server)) < 0)
         {
             std::cerr << "Connection failed" << std::endl;
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "TcpStreamer: Connection to %s:%d failed\n", address, port);
+            close(m_socket);
+            m_socket = -1;
+            return;
         }
 
         if (m_notify)
         {
             m_notify(NULL, "connect", "{\"status\":\"connected\"}");
         }
+
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Connected to %s:%d\n", address, port);
     }
 
     ~TcpStreamer()
@@ -335,6 +345,7 @@ public:
         if (m_socket != -1)
         {
             close(m_socket);
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Connection closed\n");
         }
     }
 
@@ -347,6 +358,7 @@ public:
     {
         if (this->isConnected())
         {
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Sending %zu bytes\n", len);
             send(m_socket, buffer, len, 0);
         }
     }
