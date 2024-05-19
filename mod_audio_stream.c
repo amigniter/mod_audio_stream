@@ -2,6 +2,7 @@
  * mod_audio_stream FreeSWITCH module to stream audio to websocket and receive response
  */
 #include <stdbool.h>
+#include <math.h>
 #include "mod_audio_stream.h"
 #include "audio_streamer_glue.h"
 
@@ -99,7 +100,7 @@ static switch_status_t start_capture(switch_core_session_t *session,
     {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "start_capture: port  = %i\n", port);
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "start_capture: address  = %s\n", address);
-        address[strlen(address) - (strlen(port) + 1)] = '\0';
+        address[strlen(address) - ((int)log10(port) + 2)] = '\0';
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "start_capture: address without port  = %s\n", address);
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "calling stream_session_init for TCP.\n");
         if (SWITCH_STATUS_FALSE == stream_session_init(session, responseHandler, read_codec->implementation->actual_samples_per_second,
