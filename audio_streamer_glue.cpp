@@ -324,6 +324,8 @@ public:
         server.sin_family = AF_INET;
         server.sin_port = htons(port);
 
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: trying to connect...\n");
+
         if (connect(m_socket, (struct sockaddr *)&server, sizeof(server)) < 0)
         {
             std::cerr << "Connection failed" << std::endl;
