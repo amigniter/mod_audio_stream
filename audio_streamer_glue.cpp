@@ -723,7 +723,6 @@ extern "C"
 
                 std::strncpy(tcpAddress, address, hostEnd - hostStart);
                 tcpAddress[hostEnd - hostStart] = '\0';
-                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: it's a TCP address with port %s\n", port);
                 return 0; // TCP
             }
             switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: invalid address\n");
