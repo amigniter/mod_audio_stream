@@ -356,6 +356,7 @@ public:
 
     bool isConnected()
     {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: checking connection\n");
         return true;
     }
 
