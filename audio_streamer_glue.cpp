@@ -634,6 +634,40 @@ extern "C"
         return SWITCH_STATUS_SUCCESS;
     }
 
+    int return_port(const char *address)
+    {
+        hostStart = address;
+        hostEnd = address;
+        while (*hostEnd && *hostEnd != ':')
+        {
+            if (!std::isalnum(*hostEnd) && *hostEnd != '-' && *hostEnd != '.')
+            {
+                return 0;
+            }
+            ++hostEnd;
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "return_port: hostEnd increased and now = %s\n", hostEnd);
+        }
+        if (*hostEnd == ':')
+        {
+            portStart = hostEnd + 1;
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "return_port: portStart  = %s\n", portStart);
+            while (*portStart && *portStart != '/')
+            {
+                if (!std::isdigit(*portStart))
+                {
+                    return 0;
+                }
+                ++portStart;
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "return_port: portStart increased and now = %s\n", portStart);
+            }
+            const char *portString = hostEnd + 1;
+            int newPort = atoi(portString);
+            return newPort;
+        }
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: invalid address\n");
+        return 0; // Invalid address
+    }
+
     int validate_address(const char *address, char *wsUri, char *tcpAddress, int *port) // Corrected port type
     {
         const char *scheme = nullptr;

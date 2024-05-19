@@ -80,7 +80,6 @@ static switch_status_t start_capture(switch_core_session_t *session,
 
     char wsUri[MAX_WS_URI];
     char tcpAddress[MAX_WS_URI];
-    int port = 0;
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "starting validate_address\n");
     bool isWs = validate_address(address, wsUri, tcpAddress, &port);
@@ -97,6 +96,7 @@ static switch_status_t start_capture(switch_core_session_t *session,
     }
     else
     {
+        int port = return_port(address);
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "calling stream_session_init for TCP.\n");
         if (SWITCH_STATUS_FALSE == stream_session_init(session, responseHandler, read_codec->implementation->actual_samples_per_second,
                                                        tcpAddress, port, sampling, channels, metadata, &pUserData))
