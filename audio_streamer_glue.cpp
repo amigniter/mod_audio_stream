@@ -337,10 +337,10 @@ public:
 
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: connected..\n");
 
-        if (m_notify)
-        {
-            m_notify(NULL, "connect", "{\"status\":\"connected\"}");
-        }
+        // if (m_notify)
+        // {
+        //     m_notify(NULL, "connect", "{\"status\":\"connected\"}");
+        // }
 
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Connected to %s:%d\n", address, port);
     }
