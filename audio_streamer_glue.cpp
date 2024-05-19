@@ -829,58 +829,48 @@ extern "C"
     }
 }
 
-class TcpStreamer
+TcpStreamer::TcpStreamer(const char *uuid, const char *address, int port, responseHandler_t callback)
+    : m_sessionId(uuid), m_address(address), m_port(port), m_notify(callback), m_socket(-1)
 {
-public:
-    TcpStreamer(const char *uuid, const char *address, int port, responseHandler_t callback) : m_sessionId(uuid), m_address(address), m_port(port), m_notify(callback), m_socket(-1)
+    m_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (m_socket == -1)
     {
-        m_socket = socket(AF_INET, SOCK_STREAM, 0);
-        if (m_socket == -1)
-        {
-            std::cerr << "Could not create socket" << std::endl;
-        }
-
-        struct sockaddr_in server;
-        server.sin_addr.s_addr = inet_addr(address);
-        server.sin_family = AF_INET;
-        server.sin_port = htons(port);
-
-        if (connect(m_socket, (struct sockaddr *)&server, sizeof(server)) < 0)
-        {
-            std::cerr << "Connection failed" << std::endl;
-        }
-
-        if (m_notify)
-        {
-            m_notify(NULL, "connect", "{\"status\":\"connected\"}");
-        }
+        std::cerr << "Could not create socket" << std::endl;
     }
 
-    ~TcpStreamer()
+    struct sockaddr_in server;
+    server.sin_addr.s_addr = inet_addr(address);
+    server.sin_family = AF_INET;
+    server.sin_port = htons(port);
+
+    if (connect(m_socket, (struct sockaddr *)&server, sizeof(server)) < 0)
     {
-        if (m_socket != -1)
-        {
-            close(m_socket);
-        }
+        std::cerr << "Connection failed" << std::endl;
     }
 
-    bool isConnected()
+    if (m_notify)
     {
-        return m_socket != -1;
+        m_notify(NULL, "connect", "{\"status\":\"connected\"}");
     }
+}
 
-    void writeBinary(uint8_t *buffer, size_t len)
+TcpStreamer::~TcpStreamer()
+{
+    if (m_socket != -1)
     {
-        if (this->isConnected())
-        {
-            send(m_socket, buffer, len, 0);
-        }
+        close(m_socket);
     }
+}
 
-private:
-    std::string m_sessionId;
-    const char *m_address;
-    int m_port;
-    responseHandler_t m_notify;
-    int m_socket;
-};
+bool TcpStreamer::isConnected()
+{
+    return m_socket != -1;
+}
+
+void TcpStreamer::writeBinary(uint8_t *buffer, size_t len)
+{
+    if (this->isConnected())
+    {
+        send(m_socket, buffer, len, 0);
+    }
+}
