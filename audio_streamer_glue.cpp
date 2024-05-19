@@ -13,6 +13,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <iostream>
+#include <stdlib.h>
 
 #define FRAME_SIZE_8000 320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
 #define BUFFERIZATION_INTERVAL_MS 500
@@ -677,8 +678,7 @@ extern "C"
                     ++portStart;
                     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: portStart increased and now = %s\n", portStart);
                 }
-                ++hostEnd;
-                *port = atoi(*hostEnd);
+                *port = atoi(hostEnd + 1);
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: port is assigned\n");
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: port = %s\n", *port);
                 std::strncpy(tcpAddress, address, hostEnd - hostStart);
