@@ -1,6 +1,7 @@
 /*
  * mod_audio_stream FreeSWITCH module to stream audio to websocket and receive response
  */
+#include <stdbool.h>
 #include "mod_audio_stream.h"
 #include "audio_streamer_glue.h"
 
@@ -86,7 +87,7 @@ static switch_status_t start_capture(switch_core_session_t *session,
     {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "calling stream_session_init for WS.\n");
         if (SWITCH_STATUS_FALSE == stream_session_init(session, responseHandler, read_codec->implementation->actual_samples_per_second,
-                                                       wsUri, port, sampling, channels, metadata, &pUserData, "WS"))
+                                                       wsUri, port, channels, metadata, &pUserData, "WS"))
         {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing mod_audio_stream WS session.\n");
             return SWITCH_STATUS_FALSE;
