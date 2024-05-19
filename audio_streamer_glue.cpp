@@ -652,7 +652,9 @@ extern "C"
             switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: it is not a WS address\n");
             // Check for TCP
             hostStart = address;
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: hostStart = %s\n", hostStart);
             hostEnd = address;
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: hostEnd = %s\n", hostEnd);
             while (*hostEnd && *hostEnd != ':')
             {
                 if (!std::isalnum(*hostEnd) && *hostEnd != '-' && *hostEnd != '.')
@@ -660,10 +662,12 @@ extern "C"
                     return 0;
                 }
                 ++hostEnd;
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: hostEnd increased and now = %s\n", hostEnd);
             }
             if (*hostEnd == ':')
             {
                 portStart = hostEnd + 1;
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: portStart  = %s\n", portStart);
                 while (*portStart && *portStart != '/')
                 {
                     if (!std::isdigit(*portStart))
@@ -671,8 +675,10 @@ extern "C"
                         return 0;
                     }
                     ++portStart;
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: portStart increased and now = %s\n", portStart);
                 }
                 *port = atoi(hostEnd + 1);
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: port = %s\n", port);
                 std::strncpy(tcpAddress, address, hostEnd - hostStart);
                 tcpAddress[hostEnd - hostStart] = '\0';
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: it's a TCP address with port %s\n", port);
