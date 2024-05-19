@@ -81,13 +81,13 @@ static switch_status_t start_capture(switch_core_session_t *session,
     char wsUri[MAX_WS_URI];
     char tcpAddress[MAX_WS_URI];
     int port = 0;
-    bool isWs = validate_address(address, wsUri, tcpAddress, &port);
+    bool isWs = validate_address(address, wsUri, tcpAddress);
 
     if (isWs)
     {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "calling stream_session_init for WS.\n");
         if (SWITCH_STATUS_FALSE == stream_session_init(session, responseHandler, read_codec->implementation->actual_samples_per_second,
-                                                       wsUri, 0, sampling, channels, metadata, &pUserData, "WS"))
+                                                       wsUri, 0, sampling, channels, metadata, &pUserData))
         {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing mod_audio_stream WS session.\n");
             return SWITCH_STATUS_FALSE;
@@ -97,7 +97,7 @@ static switch_status_t start_capture(switch_core_session_t *session,
     {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "calling stream_session_init for TCP.\n");
         if (SWITCH_STATUS_FALSE == stream_session_init(session, responseHandler, read_codec->implementation->actual_samples_per_second,
-                                                       tcpAddress, port, sampling, channels, metadata, &pUserData, "TCP"))
+                                                       tcpAddress, port, sampling, channels, metadata, &pUserData))
         {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing mod_audio_stream TCP session.\n");
             return SWITCH_STATUS_FALSE;
@@ -266,7 +266,7 @@ SWITCH_STANDARD_API(stream_function)
                 {
                     sampling = atoi(argv[4]);
                 }
-                if (!validate_address(argv[2], address, address, &port))
+                if (!validate_address(argv[2], address, address))
                 {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "invalid address: %s\n", argv[2]);
                 }
