@@ -679,6 +679,7 @@ extern "C"
                     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: portStart increased and now = %s\n", portStart);
                 }
                 //
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "validate_address: we will try to parse the port\n");
                 const char *portString = hostEnd + 1;
                 *port = atoi(portString);
                 // *port = (int)strtol(hostEnd + 1, nullptr, 10);
