@@ -359,7 +359,7 @@ namespace
         memset(tech_pvt, 0, sizeof(private_t));
 
         strncpy(tech_pvt->sessionId, switch_core_session_get_uuid(session), MAX_SESSION_ID);
-        strncpy(tech_pvt->ws_uri, wsUri, MAX_WS_URI);
+        strncpy(tech_pvt->ws_uri, address, MAX_WS_URI); // Fixed to use address instead of undefined wsUri
         tech_pvt->sampling = desiredSampling;
         tech_pvt->responseHandler = responseHandler;
         tech_pvt->rtp_packets = rtp_packets;
@@ -369,8 +369,6 @@ namespace
         if (metadata)
             strncpy(tech_pvt->initialMetadata, metadata, MAX_METADATA_LEN);
 
-        // size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PERIOD * BUFFERED_SEC);
-        // size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * rtp_packets);
         size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * BUFFERIZATION_INTERVAL_MS / 20);
 
         if (strcmp(STREAM_TYPE, "TCP") == 0)
@@ -462,7 +460,7 @@ namespace
 
 extern "C"
 {
-    int validate_address(const char *address, char *wsUri, char *tcpAddress, int port)
+    int validate_address(const char *address, char *wsUri, char *tcpAddress, int *port) // Corrected port type
     {
         const char *scheme = nullptr;
         const char *hostStart = nullptr;
@@ -659,9 +657,10 @@ extern "C"
                                         int sampling,
                                         int channels,
                                         char *metadata,
-                                        void **ppUserData)
+                                        void **ppUserData,
+                                        const char *streamType)
     {
-        int deflate, heart_beat;
+        int deflate = 0, heart_beat = 0;
         bool globalTrace = false;
         bool suppressLog = false;
         const char *buffer_size;
@@ -838,8 +837,7 @@ public:
         m_socket = socket(AF_INET, SOCK_STREAM, 0);
         if (m_socket == -1)
         {
-        std:
-            cerr << "Could not create socket" << std::endl;
+            std::cerr << "Could not create socket" << std::endl;
         }
 
         struct sockaddr_in server;
@@ -849,7 +847,7 @@ public:
 
         if (connect(m_socket, (struct sockaddr *)&server, sizeof(server)) < 0)
         {
-            std::cerr << "Connection failed" << std : endl;
+            std::cerr << "Connection failed" << std::endl;
         }
 
         if (m_notify)
@@ -873,13 +871,14 @@ public:
 
     void writeBinary(uint8_t *buffer, size_t len)
     {
-        if (this.isConnected())
+        if (this->isConnected())
         {
             send(m_socket, buffer, len, 0);
         }
     }
 
 private:
+    std::string m_sessionId;
     const char *m_address;
     int m_port;
     responseHandler_t m_notify;
