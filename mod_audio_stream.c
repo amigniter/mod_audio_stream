@@ -82,7 +82,7 @@ static switch_status_t start_capture(switch_core_session_t *session,
     char tcpAddress[MAX_WS_URI];
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "starting validate_address\n");
-    bool isWs = validate_address(address, wsUri, tcpAddress, &port);
+    bool isWs = validate_address(address, wsUri, tcpAddress, 0);
 
     if (isWs)
     {
