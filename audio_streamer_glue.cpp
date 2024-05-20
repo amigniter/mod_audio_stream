@@ -357,7 +357,7 @@ public:
     bool isConnected()
     {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: checking connection\n");
-        return false;
+        return m_socket != -1;
     }
 
     void writeBinary(uint8_t *buffer, size_t len)
