@@ -694,13 +694,26 @@ namespace
 
     void finish(private_t *tech_pvt)
     {
-        std::shared_ptr<AudioStreamer> aStreamer;
-        aStreamer.reset((AudioStreamer *)tech_pvt->pAudioStreamer);
-        tech_pvt->pAudioStreamer = nullptr;
+        if (strcmp(STREAM_TYPE, "TCP") == 0)
+        {
+            std::shared_ptr<TcpStreamer> tStreamer;
+            tStreamer.reset((TcpStreamer *)tech_pvt->pAudioStreamer);
+            tech_pvt->pAudioStreamer = nullptr;
 
-        std::thread t([aStreamer]
-                      { aStreamer->disconnect(); });
-        t.detach();
+            std::thread t([tStreamer]
+                          { tStreamer->disconnect(); });
+            t.detach();
+        }
+        else
+        {
+            std::shared_ptr<AudioStreamer> aStreamer;
+            aStreamer.reset((AudioStreamer *)tech_pvt->pAudioStreamer);
+            tech_pvt->pAudioStreamer = nullptr;
+
+            std::thread t([aStreamer]
+                          { aStreamer->disconnect(); });
+            t.detach();
+        }
     }
 
 }
