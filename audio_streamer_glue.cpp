@@ -28,7 +28,7 @@ class AudioStreamer
 public:
     AudioStreamer(const char *uuid, const char *wsUri, responseHandler_t callback, int deflate, int heart_beat, const char *initialMeta,
                   bool globalTrace, bool suppressLog, const char *extra_headers) : m_sessionId(uuid), m_notify(callback), m_initial_meta(initialMeta),
-                                                                                   m_global_trace(globalTrace), m_suppress_log(suppressLog), m_extra_headers(extra_headers), m_playFile(0)
+                                                                                   m_global_trace(globalTrace), m_suppress_log(suppressLog), m_extra_headers(extra_headers), m_playFile(0)(0)
     {
 
         ix::WebSocketHttpHeaders headers;
@@ -310,7 +310,7 @@ class TcpStreamer
 public:
     TcpStreamer(const char *uuid, const char *address, int port, const char *initialMeta,
                 bool globalTrace, bool suppressLog, responseHandler_t callback) : m_sessionId(uuid), m_address(address), m_port(port), m_notify(callback), m_initial_meta(initialMeta),
-                                                                                  m_global_trace(globalTrace), m_suppress_log(suppressLog), m_socket(-1)
+                                                                                  m_global_trace(globalTrace), m_suppress_log(suppressLog), m_socket(-1), m_playFile(0)
     {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Initializing TCP connection to %s:%d\n", address, port);
 
@@ -494,7 +494,7 @@ public:
             root = cJSON_CreateObject();
             cJSON_AddStringToObject(root, "status", "disconnected");
             message = cJSON_CreateObject();
-            cJSON_AddNumberToObject(message, "code", "");
+            cJSON_AddNumberToObject(message, "code", 0);
             cJSON_AddStringToObject(message, "reason", "");
             cJSON_AddItemToObject(root, "message", message);
             char *json_str = cJSON_PrintUnformatted(root);
@@ -530,6 +530,10 @@ private:
     responseHandler_t m_notify;
     const char *m_initial_meta;
     bool m_suppress_log;
+    bool m_global_trace;
+    int m_playFile;
+    std::unordered_set<std::string> m_Files;
+    std::unordered_set<std::string> m_Files;
     int m_socket;
 };
 
