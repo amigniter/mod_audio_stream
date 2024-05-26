@@ -1081,8 +1081,6 @@ extern "C"
             {
                 if (frame.datalen)
                 {
-                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "stream_frame: Read %u bytes from media bug\n", frame.datalen);
-
                     size_t remaining = 0;
                     if (available >= frame.datalen)
                     {
@@ -1100,7 +1098,6 @@ extern "C"
                         uint8_t chunkPtr[nFrames];
                         ringBufferGetMultiple(tech_pvt->buffer, chunkPtr, nFrames);
 
-                        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "stream_frame: Writing %zu bytes to audio streamer\n", nFrames);
                         strcmp(STREAM_TYPE, "TCP") == 0 ? pTcpStreamer->writeBinary(chunkPtr, nFrames) : pAudioStreamer->writeBinary(chunkPtr, nFrames);
                         ringBufferClear(tech_pvt->buffer);
                     }
