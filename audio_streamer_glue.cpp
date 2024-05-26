@@ -830,14 +830,7 @@ extern "C"
                 return SWITCH_TRUE;
             }
 
-            if (strcmp(STREAM_TYPE, "TCP") == 0)
-            {
-                auto *pAudioStreamer = static_cast<TcpStreamer *>(tech_pvt->pAudioStreamer);
-            }
-            else
-            {
-                auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
-            }
+            auto *pAudioStreamer = strcmp(STREAM_TYPE, "TCP") == 0 ? static_cast<TcpStreamer *>(tech_pvt->pAudioStreamer) : static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
 
             if (!pAudioStreamer->isConnected())
             {
