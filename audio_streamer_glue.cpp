@@ -15,6 +15,9 @@
 #include <iostream>
 #include <stdlib.h>
 
+#include <chrono>
+#include <thread>
+
 #define FRAME_SIZE_8000 320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
 #define BUFFERIZATION_INTERVAL_MS 500
 
@@ -309,9 +312,11 @@ class TcpStreamer
 {
 public:
     TcpStreamer(const char *uuid, const char *address, int port, const char *initialMeta,
-                bool globalTrace, bool suppressLog, responseHandler_t callback) : m_sessionId(uuid), m_address(address), m_port(port), m_notify(callback), m_initial_meta(initialMeta),
-                                                                                  m_global_trace(globalTrace), m_suppress_log(suppressLog), m_socket(-1), m_playFile(0)
+                bool globalTrace, bool suppressLog, responseHandler_t callback, int samplingRate, int channels)
+        : m_sessionId(uuid), m_address(address), m_port(port), m_notify(callback), m_initial_meta(initialMeta),
+          m_global_trace(globalTrace), m_suppress_log(suppressLog), m_socket(-1), m_playFile(0), m_samplingRate(samplingRate), m_channels(channels)
     {
+
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Initializing TCP connection to %s:%d\n", address, port);
 
         m_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -546,7 +551,7 @@ public:
             static auto last_send_time = std::chrono::steady_clock::now();
             auto now = std::chrono::steady_clock::now();
             std::chrono::duration<double> elapsed = now - last_send_time;
-            double expected_interval = static_cast<double>(len) / (tech_pvt->sampling * tech_pvt->channels * 2); // 2 bytes per sample for 16-bit audio
+            double expected_interval = static_cast<double>(len) / (m_samplingRate * m_channels * 2); // 2 bytes per sample for 16-bit audio
 
             if (elapsed.count() < expected_interval)
             {
@@ -569,6 +574,8 @@ private:
     int m_playFile;
     std::unordered_set<std::string> m_Files;
     int m_socket;
+    int m_samplingRate;
+    int m_channels;
 };
 
 namespace
@@ -642,7 +649,7 @@ namespace
         if (strcmp(STREAM_TYPE, "TCP") == 0)
         {
             switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "stream_data_init: initiate TCP streamer\n");
-            auto *tcpStreamer = new TcpStreamer(tech_pvt->sessionId, address, port, metadata, globalTrace, suppressLog, responseHandler);
+            auto *tcpStreamer = new TcpStreamer(tech_pvt->sessionId, address, port, metadata, globalTrace, suppressLog, responseHandler, desiredSampling, channels);
             tech_pvt->pAudioStreamer = static_cast<void *>(tcpStreamer);
         }
         else
