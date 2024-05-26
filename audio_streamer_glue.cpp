@@ -308,7 +308,9 @@ private:
 class TcpStreamer
 {
 public:
-    TcpStreamer(const char *uuid, const char *address, int port, responseHandler_t callback) : m_sessionId(uuid), m_address(address), m_port(port), m_notify(callback), m_socket(-1)
+    TcpStreamer(const char *uuid, const char *address, int port, const char *initialMeta,
+                bool globalTrace, bool suppressLog, responseHandler_t callback) : m_sessionId(uuid), m_address(address), m_port(port), m_notify(callback), m_initial_meta(initialMeta),
+                                                                                  m_global_trace(globalTrace), m_suppress_log(suppressLog), m_socket(-1)
     {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Initializing TCP connection to %s:%d\n", address, port);
 
@@ -362,6 +364,91 @@ public:
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Connected to %s:%d\n", address, port);
     }
 
+    switch_bool_t processMessage(switch_core_session_t *session, std::string &message)
+    {
+        cJSON *json = cJSON_Parse(message.c_str());
+        switch_bool_t status = SWITCH_FALSE;
+        if (!json)
+        {
+            return status;
+        }
+        const char *jsType = cJSON_GetObjectCstr(json, "type");
+        if (jsType && strcmp(jsType, "streamAudio") == 0)
+        {
+            cJSON *jsonData = cJSON_GetObjectItem(json, "data");
+            if (jsonData)
+            {
+                cJSON *jsonFile = nullptr;
+                cJSON *jsonAudio = cJSON_DetachItemFromObject(jsonData, "audioData");
+                const char *jsAudioDataType = cJSON_GetObjectCstr(jsonData, "audioDataType");
+                std::string fileType;
+                int sampleRate;
+                if (0 == strcmp(jsAudioDataType, "raw"))
+                {
+                    cJSON *jsonSampleRate = cJSON_GetObjectItem(jsonData, "sampleRate");
+                    sampleRate = jsonSampleRate && jsonSampleRate->valueint ? jsonSampleRate->valueint : 0;
+                    std::unordered_map<int, const char *> sampleRateMap = {
+                        {8000, ".r8"},
+                        {16000, ".r16"},
+                        {24000, ".r24"},
+                        {32000, ".r32"},
+                        {48000, ".r48"},
+                        {64000, ".r64"}};
+                    auto it = sampleRateMap.find(sampleRate);
+                    fileType = (it != sampleRateMap.end()) ? it->second : "";
+                }
+                else if (0 == strcmp(jsAudioDataType, "wav"))
+                {
+                    fileType = ".wav";
+                }
+                else
+                {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - unsupported audio type: %s\n",
+                                      m_sessionId.c_str(), jsAudioDataType);
+                }
+
+                if (jsonAudio && jsonAudio->valuestring != nullptr && !fileType.empty())
+                {
+                    char filePath[256];
+                    std::string rawAudio = base64_decode(jsonAudio->valuestring);
+                    switch_snprintf(filePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir,
+                                    SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++, fileType.c_str());
+                    std::ofstream fstream(filePath, std::ofstream::binary);
+                    fstream << rawAudio;
+                    fstream.close();
+                    m_Files.insert(filePath);
+                    jsonFile = cJSON_CreateString(filePath);
+                    cJSON_AddItemToObject(jsonData, "file", jsonFile);
+                }
+
+                if (jsonFile)
+                {
+                    char *jsonString = cJSON_PrintUnformatted(jsonData);
+                    m_notify(session, EVENT_PLAY, jsonString);
+                    message.assign(jsonString);
+                    free(jsonString);
+                    status = SWITCH_TRUE;
+                }
+                if (jsonAudio)
+                    cJSON_Delete(jsonAudio);
+            }
+            else
+            {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - no data in streamAudio\n", m_sessionId.c_str());
+            }
+        }
+        cJSON_Delete(json);
+        return status;
+    }
+
+    static void media_bug_close(switch_core_session_t *session)
+    {
+        switch_channel_t *channel = switch_core_session_get_channel(session);
+        auto *bug = (switch_media_bug_t *)switch_channel_get_private(channel, MY_BUG_NAME);
+        if (bug)
+            switch_core_media_bug_close(&bug, SWITCH_FALSE);
+    }
+
     void eventCallback(notifyEvent_t event, const char *message)
     {
         switch_core_session_t *psession = switch_core_session_locate(m_sessionId.c_str());
@@ -370,12 +457,6 @@ public:
             switch (event)
             {
             case CONNECT_SUCCESS:
-                if (m_initial_meta && strlen(m_initial_meta) > 0)
-                {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
-                                      "sending initial metadata %s\n", m_initial_meta);
-                    writeText(m_initial_meta);
-                }
                 m_notify(psession, EVENT_CONNECT, message);
                 break;
             case CONNECTION_DROPPED:
@@ -413,8 +494,8 @@ public:
             root = cJSON_CreateObject();
             cJSON_AddStringToObject(root, "status", "disconnected");
             message = cJSON_CreateObject();
-            cJSON_AddNumberToObject(message, "code", msg->closeInfo.code);
-            cJSON_AddStringToObject(message, "reason", msg->closeInfo.reason.c_str());
+            cJSON_AddNumberToObject(message, "code", "");
+            cJSON_AddStringToObject(message, "reason", "");
             cJSON_AddItemToObject(root, "message", message);
             char *json_str = cJSON_PrintUnformatted(root);
 
@@ -447,6 +528,8 @@ private:
     const char *m_address;
     int m_port;
     responseHandler_t m_notify;
+    const char *m_initial_meta;
+    bool m_suppress_log;
     int m_socket;
 };
 
@@ -521,7 +604,7 @@ namespace
         if (strcmp(STREAM_TYPE, "TCP") == 0)
         {
             switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "stream_data_init: initiate TCP streamer\n");
-            auto *tcpStreamer = new TcpStreamer(tech_pvt->sessionId, address, port, responseHandler);
+            auto *tcpStreamer = new TcpStreamer(tech_pvt->sessionId, address, port, metadata, globalTrace, suppressLog, responseHandler);
             tech_pvt->pAudioStreamer = static_cast<void *>(tcpStreamer);
         }
         else
