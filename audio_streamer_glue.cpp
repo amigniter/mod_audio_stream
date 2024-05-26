@@ -264,7 +264,7 @@ public:
 
     bool isConnected()
     {
-        // switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AudioStreamer: checking connection\n");
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AudioStreamer: checking connection\n");
         return (webSocket.getReadyState() == ix::ReadyState::Open);
     }
 
