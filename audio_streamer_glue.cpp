@@ -264,7 +264,7 @@ public:
 
     bool isConnected()
     {
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AudioStreamer: checking connection\n");
+        // switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AudioStreamer: checking connection\n");
         return (webSocket.getReadyState() == ix::ReadyState::Open);
     }
 
@@ -357,7 +357,7 @@ public:
 
     bool isConnected()
     {
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: checking connection\n");
+        // switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: checking connection\n");
         return m_socket != -1;
     }
 
@@ -821,7 +821,7 @@ extern "C"
 
     switch_bool_t stream_frame(switch_media_bug_t *bug)
     {
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "stream_frame: trying to stream\n");
+        // switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "stream_frame: trying to stream\n");
         auto *tech_pvt = (private_t *)switch_core_media_bug_get_user_data(bug);
         if (!tech_pvt || tech_pvt->audio_paused)
             return SWITCH_TRUE;
