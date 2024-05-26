@@ -533,10 +533,28 @@ public:
 
     void writeBinary(uint8_t *buffer, size_t len)
     {
+        // if (this->isConnected())
+        // {
+        //     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Sending %zu bytes\n", len);
+        //     send(m_socket, buffer, len, 0);
+        // }
         if (this->isConnected())
         {
             switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Sending %zu bytes\n", len);
+
+            // Add a delay to match the audio frame rate
+            static auto last_send_time = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            std::chrono::duration<double> elapsed = now - last_send_time;
+            double expected_interval = static_cast<double>(len) / (tech_pvt->sampling * tech_pvt->channels * 2); // 2 bytes per sample for 16-bit audio
+
+            if (elapsed.count() < expected_interval)
+            {
+                std::this_thread::sleep_for(std::chrono::duration<double>(expected_interval - elapsed.count()));
+            }
+
             send(m_socket, buffer, len, 0);
+            last_send_time = now;
         }
     }
 
@@ -939,7 +957,7 @@ extern "C"
                                         void **ppUserData,
                                         const char *streamType)
     {
-        int deflate = 1, heart_beat = 0;
+        int deflate = 0, heart_beat = 0;
         bool globalTrace = false;
         bool suppressLog = false;
         const char *buffer_size;
@@ -948,10 +966,10 @@ extern "C"
 
         switch_channel_t *channel = switch_core_session_get_channel(session);
 
-        // if (switch_channel_var_true(channel, "STREAM_MESSAGE_DEFLATE"))
-        // {
-        //     deflate = 1;
-        // }
+        if (switch_channel_var_true(channel, "STREAM_MESSAGE_DEFLATE"))
+        {
+            deflate = 1;
+        }
 
         if (switch_channel_var_true(channel, "STREAM_GLOBAL_TRACE"))
         {
