@@ -939,7 +939,7 @@ extern "C"
                                         void **ppUserData,
                                         const char *streamType)
     {
-        int deflate = 0, heart_beat = 0;
+        int deflate = 1, heart_beat = 0;
         bool globalTrace = false;
         bool suppressLog = false;
         const char *buffer_size;
@@ -948,10 +948,10 @@ extern "C"
 
         switch_channel_t *channel = switch_core_session_get_channel(session);
 
-        if (switch_channel_var_true(channel, "STREAM_MESSAGE_DEFLATE"))
-        {
-            deflate = 1;
-        }
+        // if (switch_channel_var_true(channel, "STREAM_MESSAGE_DEFLATE"))
+        // {
+        //     deflate = 1;
+        // }
 
         if (switch_channel_var_true(channel, "STREAM_GLOBAL_TRACE"))
         {
