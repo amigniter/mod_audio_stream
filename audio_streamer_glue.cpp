@@ -868,7 +868,7 @@ extern "C"
                         ringBufferGetMultiple(tech_pvt->buffer, chunkPtr, nFrames);
 
                         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "stream_frame: writing binary\n");
-                        pAudioStreamer->writeBinary(chunkPtr, nFrames);
+                        strcmp(STREAM_TYPE, "TCP") == 0 ? pTcpStreamer->writeBinary(chunkPtr, nFrames) : pAudioStreamer->writeBinary(chunkPtr, nFrames);
                         ringBufferClear(tech_pvt->buffer);
                     }
                 }
