@@ -332,10 +332,37 @@ public:
             std::cerr << "Connection failed" << std::endl;
             switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "TcpStreamer: Connection to %s:%d failed\n", address, port);
             close(m_socket);
+
+            cJSON *root, *message;
+            root = cJSON_CreateObject();
+            cJSON_AddStringToObject(root, "status", "error");
+            message = cJSON_CreateObject();
+            cJSON_AddNumberToObject(message, "retries", msg->errorInfo.retries);
+            cJSON_AddStringToObject(message, "error", msg->errorInfo.reason.c_str());
+            cJSON_AddNumberToObject(message, "wait_time", msg->errorInfo.wait_time);
+            cJSON_AddNumberToObject(message, "http_status", msg->errorInfo.http_status);
+            cJSON_AddItemToObject(root, "message", message);
+
+            char *json_str = cJSON_PrintUnformatted(root);
+
+            eventCallback(CONNECT_ERROR, json_str);
+
+            cJSON_Delete(root);
+            switch_safe_free(json_str);
+
             m_socket = -1;
             return;
         }
 
+        cJSON *root;
+        root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "status", "connected");
+        char *json_str = cJSON_PrintUnformatted(root);
+
+        eventCallback(CONNECT_SUCCESS, json_str);
+
+        cJSON_Delete(root);
+        switch_safe_free(json_str);
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Connected to %s:%d\n", address, port);
     }
 
@@ -344,6 +371,21 @@ public:
         if (m_socket != -1)
         {
             close(m_socket);
+
+            cJSON *root, *message;
+            root = cJSON_CreateObject();
+            cJSON_AddStringToObject(root, "status", "disconnected");
+            message = cJSON_CreateObject();
+            cJSON_AddNumberToObject(message, "code", msg->closeInfo.code);
+            cJSON_AddStringToObject(message, "reason", msg->closeInfo.reason.c_str());
+            cJSON_AddItemToObject(root, "message", message);
+            char *json_str = cJSON_PrintUnformatted(root);
+
+            eventCallback(CONNECTION_DROPPED, json_str);
+
+            cJSON_Delete(root);
+            switch_safe_free(json_str);
+
             switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Connection closed\n");
         }
     }
