@@ -1065,7 +1065,7 @@ extern "C"
 
             auto *audioStreamer = (AudioStreamer *)tech_pvt->pAudioStreamer;
             auto *tcpStreamer = (TcpStreamer *)tech_pvt->pAudioStreamer;
-            if (strcmp(STREAM_TYPE, "TCP") == 0 ? tcpStreamer : audioStreamer)
+            if (tcpStreamer || audioStreamer)
             {
                 strcmp(STREAM_TYPE, "TCP") == 0 ? tcpStreamer->deleteFiles() : audioStreamer->deleteFiles();
                 if (text && strcmp(STREAM_TYPE, "WS") == 0)
