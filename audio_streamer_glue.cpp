@@ -449,6 +449,17 @@ public:
             switch_core_media_bug_close(&bug, SWITCH_FALSE);
     }
 
+    void deleteFiles()
+    {
+        if (m_playFile > 0)
+        {
+            for (const auto &fileName : m_Files)
+            {
+                remove(fileName.c_str());
+            }
+        }
+    }
+
     void eventCallback(notifyEvent_t event, const char *message)
     {
         switch_core_session_t *psession = switch_core_session_locate(m_sessionId.c_str());
