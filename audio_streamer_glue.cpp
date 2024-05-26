@@ -830,10 +830,16 @@ extern "C"
                 return SWITCH_TRUE;
             }
 
-            auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
+            if (strcmp(STREAM_TYPE, "TCP") == 0)
+            {
+                auto *pAudioStreamer = static_cast<TcpStreamer *>(tech_pvt->pAudioStreamer);
+            }
+            else
+            {
+                auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
+            }
 
-            // if (!pAudioStreamer->isConnected())
-            if (!tech_pvt->pAudioStreamer->isConnected())
+            if (!pAudioStreamer->isConnected())
             {
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "stream_frame: audio streamer is not connected\n");
                 switch_mutex_unlock(tech_pvt->mutex);
