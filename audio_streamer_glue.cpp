@@ -532,7 +532,7 @@ public:
 
     bool isConnected()
     {
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: checking connection\n");
+        // switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: checking connection\n");
         return m_socket != -1;
     }
 
@@ -553,9 +553,12 @@ public:
             std::chrono::duration<double> elapsed = now - last_send_time;
             double expected_interval = static_cast<double>(len) / (m_samplingRate * m_channels * 2); // 2 bytes per sample for 16-bit audio
 
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Time elapsed since last send: %.6f seconds, expected interval: %.6f seconds\n", elapsed.count(), expected_interval);
+
             if (elapsed.count() < expected_interval)
             {
                 std::this_thread::sleep_for(std::chrono::duration<double>(expected_interval - elapsed.count()));
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Sleeping for %.6f seconds to match expected interval\n", expected_interval - elapsed.count());
             }
 
             send(m_socket, buffer, len, 0);
@@ -689,6 +692,10 @@ namespace
             {
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing resampler: %s.\n", speex_resampler_strerror(err));
                 return SWITCH_STATUS_FALSE;
+            }
+            else
+            {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Resampler initialized successfully: %u to %u\n", sampling, desiredSampling);
             }
         }
         else
@@ -1037,7 +1044,6 @@ extern "C"
 
     switch_bool_t stream_frame(switch_media_bug_t *bug)
     {
-        // switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "stream_frame: trying to stream\n");
         auto *tech_pvt = (private_t *)switch_core_media_bug_get_user_data(bug);
         if (!tech_pvt || tech_pvt->audio_paused)
             return SWITCH_TRUE;
@@ -1056,7 +1062,7 @@ extern "C"
 
             if (strcmp(STREAM_TYPE, "TCP") == 0 ? !pTcpStreamer->isConnected() : !pAudioStreamer->isConnected())
             {
-                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "stream_frame: audio streamer is not connected\n");
+                // switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "stream_frame: audio streamer is not connected\n");
                 switch_mutex_unlock(tech_pvt->mutex);
                 return SWITCH_TRUE;
             }
@@ -1071,6 +1077,8 @@ extern "C"
             {
                 if (frame.datalen)
                 {
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "stream_frame: Read %u bytes from media bug\n", frame.datalen);
+
                     size_t remaining = 0;
                     if (available >= frame.datalen)
                     {
@@ -1088,7 +1096,7 @@ extern "C"
                         uint8_t chunkPtr[nFrames];
                         ringBufferGetMultiple(tech_pvt->buffer, chunkPtr, nFrames);
 
-                        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "stream_frame: writing binary\n");
+                        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "stream_frame: Writing %zu bytes to audio streamer\n", nFrames);
                         strcmp(STREAM_TYPE, "TCP") == 0 ? pTcpStreamer->writeBinary(chunkPtr, nFrames) : pAudioStreamer->writeBinary(chunkPtr, nFrames);
                         ringBufferClear(tech_pvt->buffer);
                     }
