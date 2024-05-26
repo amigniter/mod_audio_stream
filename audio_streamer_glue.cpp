@@ -547,11 +547,12 @@ public:
         {
             switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Sending %zu bytes\n", len);
 
-            // Add a delay to match the audio frame rate
+            // Calculate the expected interval based on the sample rate and channels
+            double expected_interval = static_cast<double>(len) / (m_samplingRate * m_channels * 2); // 2 bytes per sample for 16-bit audio
+
             static auto last_send_time = std::chrono::steady_clock::now();
             auto now = std::chrono::steady_clock::now();
             std::chrono::duration<double> elapsed = now - last_send_time;
-            double expected_interval = static_cast<double>(len) / (m_samplingRate * m_channels * 2); // 2 bytes per sample for 16-bit audio
 
             switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Time elapsed since last send: %.6f seconds, expected interval: %.6f seconds\n", elapsed.count(), expected_interval);
 
@@ -1090,7 +1091,7 @@ extern "C"
                         remaining = frame.datalen - available;
                     }
 
-                    if (ringBufferLen(tech_pvt->buffer) >= FRAME_SIZE_8000 * tech_pvt->sampling / 8000 * tech_pvt->channels * BUFFERIZATION_INTERVAL_MS / 20)
+                    if (ringBufferLen(tech_pvt->buffer) >= FRAME_SIZE_8000 * tech_pvt->sampling / 8000 * tech_pvt->channels * 2)
                     {
                         size_t nFrames = ringBufferLen(tech_pvt->buffer);
                         uint8_t chunkPtr[nFrames];
