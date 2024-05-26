@@ -548,6 +548,11 @@ public:
         return m_socket != -1;
     }
 
+    void writeText(const char *text) override
+    {
+        return; // we won't be sending text messages over TCP now
+    }
+
     void writeBinary(uint8_t *buffer, size_t len) override
     {
         if (this->isConnected())
