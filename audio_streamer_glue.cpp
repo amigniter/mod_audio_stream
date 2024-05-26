@@ -28,7 +28,7 @@ class AudioStreamer
 public:
     AudioStreamer(const char *uuid, const char *wsUri, responseHandler_t callback, int deflate, int heart_beat, const char *initialMeta,
                   bool globalTrace, bool suppressLog, const char *extra_headers) : m_sessionId(uuid), m_notify(callback), m_initial_meta(initialMeta),
-                                                                                   m_global_trace(globalTrace), m_suppress_log(suppressLog), m_extra_headers(extra_headers), m_playFile(0)(0)
+                                                                                   m_global_trace(globalTrace), m_suppress_log(suppressLog), m_extra_headers(extra_headers), m_playFile(0)
     {
 
         ix::WebSocketHttpHeaders headers;
@@ -532,7 +532,6 @@ private:
     bool m_suppress_log;
     bool m_global_trace;
     int m_playFile;
-    std::unordered_set<std::string> m_Files;
     std::unordered_set<std::string> m_Files;
     int m_socket;
 };
