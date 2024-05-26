@@ -337,10 +337,6 @@ public:
             root = cJSON_CreateObject();
             cJSON_AddStringToObject(root, "status", "error");
             message = cJSON_CreateObject();
-            cJSON_AddNumberToObject(message, "retries", msg->errorInfo.retries);
-            cJSON_AddStringToObject(message, "error", msg->errorInfo.reason.c_str());
-            cJSON_AddNumberToObject(message, "wait_time", msg->errorInfo.wait_time);
-            cJSON_AddNumberToObject(message, "http_status", msg->errorInfo.http_status);
             cJSON_AddItemToObject(root, "message", message);
 
             char *json_str = cJSON_PrintUnformatted(root);
@@ -364,6 +360,47 @@ public:
         cJSON_Delete(root);
         switch_safe_free(json_str);
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Connected to %s:%d\n", address, port);
+    }
+
+    void eventCallback(notifyEvent_t event, const char *message)
+    {
+        switch_core_session_t *psession = switch_core_session_locate(m_sessionId.c_str());
+        if (psession)
+        {
+            switch (event)
+            {
+            case CONNECT_SUCCESS:
+                if (m_initial_meta && strlen(m_initial_meta) > 0)
+                {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
+                                      "sending initial metadata %s\n", m_initial_meta);
+                    writeText(m_initial_meta);
+                }
+                m_notify(psession, EVENT_CONNECT, message);
+                break;
+            case CONNECTION_DROPPED:
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "connection closed\n");
+                m_notify(psession, EVENT_DISCONNECT, message);
+                break;
+            case CONNECT_ERROR:
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "connection error\n");
+                m_notify(psession, EVENT_ERROR, message);
+
+                media_bug_close(psession);
+
+                break;
+            case MESSAGE:
+                std::string msg(message);
+                if (processMessage(psession, msg) != SWITCH_TRUE)
+                {
+                    m_notify(psession, EVENT_JSON, msg.c_str());
+                }
+                if (!m_suppress_log)
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG, "response: %s\n", msg.c_str());
+                break;
+            }
+            switch_core_session_rwunlock(psession);
+        }
     }
 
     ~TcpStreamer()
