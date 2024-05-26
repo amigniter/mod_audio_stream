@@ -16,7 +16,7 @@
 #define EVENT_JSON "mod_audio_stream::json"
 #define EVENT_PLAY "mod_audio_stream::play"
 
-#define STREAM_TYPE "WS" // "TCP" or "WS"
+#define STREAM_TYPE "TCP" // "TCP" or "WS"
 
 typedef void (*responseHandler_t)(switch_core_session_t *session, const char *eventName, const char *json);
 
