@@ -675,7 +675,8 @@ namespace
         if (tech_pvt->pAudioStreamer)
         {
             auto *as = (AudioStreamer *)tech_pvt->pAudioStreamer;
-            delete as;
+            auto *ts = (TcpStreamer *)tech_pvt->pAudioStreamer;
+            strcmp(STREAM_TYPE, "TCP") == 0 ? delete ts : delete as;
             tech_pvt->pAudioStreamer = nullptr;
         }
     }
@@ -1063,10 +1064,11 @@ extern "C"
             }
 
             auto *audioStreamer = (AudioStreamer *)tech_pvt->pAudioStreamer;
-            if (audioStreamer)
+            auto *tcpStreamer = (TcpStreamer *)tech_pvt->pAudioStreamer;
+            if (strcmp(STREAM_TYPE, "TCP") == 0 ? tcpStreamer : audioStreamer)
             {
-                audioStreamer->deleteFiles();
-                if (text)
+                strcmp(STREAM_TYPE, "TCP") == 0 ? tcpStreamer->deleteFiles() : audioStreamer->deleteFiles();
+                if (text && strcmp(STREAM_TYPE, "WS") == 0)
                     audioStreamer->writeText(text);
                 finish(tech_pvt);
             }
