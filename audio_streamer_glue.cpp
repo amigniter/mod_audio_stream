@@ -441,6 +441,12 @@ public:
         return status;
     }
 
+    void disconnect()
+    {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "disconnecting...\n");
+        close(m_socket);
+    }
+
     static void media_bug_close(switch_core_session_t *session)
     {
         switch_channel_t *channel = switch_core_session_get_channel(session);
