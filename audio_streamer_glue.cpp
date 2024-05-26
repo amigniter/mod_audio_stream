@@ -2,23 +2,20 @@
 #include <cstring>
 #include "mod_audio_stream.h"
 #include <ixwebsocket/IXWebSocket.h>
-
 #include <switch_json.h>
 #include <fstream>
 #include <unordered_map>
 #include <unordered_set>
 #include "base64.h"
-
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <iostream>
 #include <stdlib.h>
-
 #include <chrono>
 #include <thread>
 
-#define FRAME_SIZE_8000 320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
+#define FRAME_SIZE_8000 320
 #define BUFFERIZATION_INTERVAL_MS 500
 
 namespace
@@ -26,157 +23,29 @@ namespace
     extern switch_bool_t filter_json_string(switch_core_session_t *session, const char *message);
 }
 
-class AudioStreamer
+class BaseStreamer
 {
 public:
-    AudioStreamer(const char *uuid, const char *wsUri, responseHandler_t callback, int deflate, int heart_beat, const char *initialMeta,
-                  bool globalTrace, bool suppressLog, const char *extra_headers) : m_sessionId(uuid), m_notify(callback), m_initial_meta(initialMeta),
-                                                                                   m_global_trace(globalTrace), m_suppress_log(suppressLog), m_extra_headers(extra_headers), m_playFile(0)
+    BaseStreamer(const char *uuid, const char *initialMeta, bool globalTrace, bool suppressLog, responseHandler_t callback)
+        : m_sessionId(uuid), m_initial_meta(initialMeta), m_global_trace(globalTrace), m_suppress_log(suppressLog), m_notify(callback), m_playFile(0)
     {
-
-        ix::WebSocketHttpHeaders headers;
-        if (m_extra_headers)
-        {
-            cJSON *headers_json = cJSON_Parse(m_extra_headers);
-            if (headers_json)
-            {
-                cJSON *iterator = headers_json->child;
-                while (iterator)
-                {
-                    if (iterator->type == cJSON_String && iterator->valuestring != nullptr)
-                    {
-                        headers[iterator->string] = iterator->valuestring;
-                    }
-                    iterator = iterator->next;
-                }
-                cJSON_Delete(headers_json);
-            }
-        }
-
-        webSocket.setUrl(wsUri);
-
-        // Optional heart beat, sent every xx seconds when there is not any traffic
-        // to make sure that load balancers do not kill an idle connection.
-        if (heart_beat)
-            webSocket.setPingInterval(heart_beat);
-
-        // Per message deflate connection is enabled by default. You can tweak its parameters or disable it
-        if (deflate)
-            webSocket.disablePerMessageDeflate();
-
-        // Set extra headers if any
-        if (!headers.empty())
-            webSocket.setExtraHeaders(headers);
-
-        // Setup a callback to be fired when a message or an event (open, close, error) is received
-        webSocket.setOnMessageCallback([this](const ix::WebSocketMessagePtr &msg)
-                                       {
-            if (msg->type == ix::WebSocketMessageType::Message)
-            {
-                eventCallback(MESSAGE, msg->str.c_str());
-
-            } else if (msg->type == ix::WebSocketMessageType::Open)
-            {
-                cJSON *root;
-                root = cJSON_CreateObject();
-                cJSON_AddStringToObject(root, "status", "connected");
-                char *json_str = cJSON_PrintUnformatted(root);
-
-                eventCallback(CONNECT_SUCCESS, json_str);
-
-                cJSON_Delete(root);
-                switch_safe_free(json_str);
-
-            } else if (msg->type == ix::WebSocketMessageType::Error)
-            {
-                //A message will be fired when there is an error with the connection. The message type will be ix::WebSocketMessageType::Error.
-                // Multiple fields will be available on the event to describe the error.
-                cJSON *root, *message;
-                root = cJSON_CreateObject();
-                cJSON_AddStringToObject(root, "status", "error");
-                message = cJSON_CreateObject();
-                cJSON_AddNumberToObject(message, "retries", msg->errorInfo.retries);
-                cJSON_AddStringToObject(message, "error", msg->errorInfo.reason.c_str());
-                cJSON_AddNumberToObject(message, "wait_time", msg->errorInfo.wait_time);
-                cJSON_AddNumberToObject(message, "http_status", msg->errorInfo.http_status);
-                cJSON_AddItemToObject(root, "message", message);
-
-                char *json_str = cJSON_PrintUnformatted(root);
-
-                eventCallback(CONNECT_ERROR, json_str);
-
-                cJSON_Delete(root);
-                switch_safe_free(json_str);
-            }
-            else if (msg->type == ix::WebSocketMessageType::Close)
-            {
-                // The server can send an explicit code and reason for closing.
-                // This data can be accessed through the closeInfo object.
-                cJSON *root, *message;
-                root = cJSON_CreateObject();
-                cJSON_AddStringToObject(root, "status", "disconnected");
-                message = cJSON_CreateObject();
-                cJSON_AddNumberToObject(message, "code", msg->closeInfo.code);
-                cJSON_AddStringToObject(message, "reason", msg->closeInfo.reason.c_str());
-                cJSON_AddItemToObject(root, "message", message);
-                char *json_str = cJSON_PrintUnformatted(root);
-
-                eventCallback(CONNECTION_DROPPED, json_str);
-
-                cJSON_Delete(root);
-                switch_safe_free(json_str);
-            } });
-
-        // Now that our callback is setup, we can start our background thread and receive messages
-        webSocket.start();
     }
 
-    static void media_bug_close(switch_core_session_t *session)
-    {
-        switch_channel_t *channel = switch_core_session_get_channel(session);
-        auto *bug = (switch_media_bug_t *)switch_channel_get_private(channel, MY_BUG_NAME);
-        if (bug)
-            switch_core_media_bug_close(&bug, SWITCH_FALSE);
-    }
+    virtual ~BaseStreamer() = default;
 
-    void eventCallback(notifyEvent_t event, const char *message)
+    virtual void disconnect() = 0;
+    virtual bool isConnected() = 0;
+    virtual void writeBinary(uint8_t *buffer, size_t len) = 0;
+    virtual void writeText(const char *text) = 0;
+
+    void deleteFiles()
     {
-        switch_core_session_t *psession = switch_core_session_locate(m_sessionId.c_str());
-        if (psession)
+        if (m_playFile > 0)
         {
-            switch (event)
+            for (const auto &fileName : m_Files)
             {
-            case CONNECT_SUCCESS:
-                if (m_initial_meta && strlen(m_initial_meta) > 0)
-                {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
-                                      "sending initial metadata %s\n", m_initial_meta);
-                    writeText(m_initial_meta);
-                }
-                m_notify(psession, EVENT_CONNECT, message);
-                break;
-            case CONNECTION_DROPPED:
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "connection closed\n");
-                m_notify(psession, EVENT_DISCONNECT, message);
-                break;
-            case CONNECT_ERROR:
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "connection error\n");
-                m_notify(psession, EVENT_ERROR, message);
-
-                media_bug_close(psession);
-
-                break;
-            case MESSAGE:
-                std::string msg(message);
-                if (processMessage(psession, msg) != SWITCH_TRUE)
-                {
-                    m_notify(psession, EVENT_JSON, msg.c_str());
-                }
-                if (!m_suppress_log)
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG, "response: %s\n", msg.c_str());
-                break;
+                remove(fileName.c_str());
             }
-            switch_core_session_rwunlock(psession);
         }
     }
 
@@ -219,16 +88,14 @@ public:
                 }
                 else
                 {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - unsupported audio type: %s\n",
-                                      m_sessionId.c_str(), jsAudioDataType);
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - unsupported audio type: %s\n", m_sessionId.c_str(), jsAudioDataType);
                 }
 
                 if (jsonAudio && jsonAudio->valuestring != nullptr && !fileType.empty())
                 {
                     char filePath[256];
                     std::string rawAudio = base64_decode(jsonAudio->valuestring);
-                    switch_snprintf(filePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir,
-                                    SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++, fileType.c_str());
+                    switch_snprintf(filePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir, SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++, fileType.c_str());
                     std::ofstream fstream(filePath, std::ofstream::binary);
                     fstream << rawAudio;
                     fstream.close();
@@ -257,66 +124,146 @@ public:
         return status;
     }
 
-    ~AudioStreamer() = default;
+protected:
+    std::string m_sessionId;
+    responseHandler_t m_notify;
+    const char *m_initial_meta;
+    bool m_suppress_log;
+    bool m_global_trace;
+    int m_playFile;
+    std::unordered_set<std::string> m_Files;
+};
 
-    void disconnect()
+class AudioStreamer : public BaseStreamer
+{
+public:
+    AudioStreamer(const char *uuid, const char *wsUri, responseHandler_t callback, int deflate, int heart_beat, const char *initialMeta,
+                  bool globalTrace, bool suppressLog, const char *extra_headers)
+        : BaseStreamer(uuid, initialMeta, globalTrace, suppressLog, callback)
+    {
+        ix::WebSocketHttpHeaders headers;
+        if (extra_headers)
+        {
+            cJSON *headers_json = cJSON_Parse(extra_headers);
+            if (headers_json)
+            {
+                cJSON *iterator = headers_json->child;
+                while (iterator)
+                {
+                    if (iterator->type == cJSON_String && iterator->valuestring != nullptr)
+                    {
+                        headers[iterator->string] = iterator->valuestring;
+                    }
+                    iterator = iterator->next;
+                }
+                cJSON_Delete(headers_json);
+            }
+        }
+
+        webSocket.setUrl(wsUri);
+
+        if (heart_beat)
+            webSocket.setPingInterval(heart_beat);
+
+        if (deflate)
+            webSocket.disablePerMessageDeflate();
+
+        if (!headers.empty())
+            webSocket.setExtraHeaders(headers);
+
+        webSocket.setOnMessageCallback([this](const ix::WebSocketMessagePtr &msg)
+                                       {
+            if (msg->type == ix::WebSocketMessageType::Message)
+            {
+                eventCallback(MESSAGE, msg->str.c_str());
+
+            } else if (msg->type == ix::WebSocketMessageType::Open)
+            {
+                cJSON *root;
+                root = cJSON_CreateObject();
+                cJSON_AddStringToObject(root, "status", "connected");
+                char *json_str = cJSON_PrintUnformatted(root);
+
+                eventCallback(CONNECT_SUCCESS, json_str);
+
+                cJSON_Delete(root);
+                switch_safe_free(json_str);
+
+            } else if (msg->type == ix::WebSocketMessageType::Error)
+            {
+                cJSON *root, *message;
+                root = cJSON_CreateObject();
+                cJSON_AddStringToObject(root, "status", "error");
+                message = cJSON_CreateObject();
+                cJSON_AddNumberToObject(message, "retries", msg->errorInfo.retries);
+                cJSON_AddStringToObject(message, "error", msg->errorInfo.reason.c_str());
+                cJSON_AddNumberToObject(message, "wait_time", msg->errorInfo.wait_time);
+                cJSON_AddNumberToObject(message, "http_status", msg->errorInfo.http_status);
+                cJSON_AddItemToObject(root, "message", message);
+
+                char *json_str = cJSON_PrintUnformatted(root);
+
+                eventCallback(CONNECT_ERROR, json_str);
+
+                cJSON_Delete(root);
+                switch_safe_free(json_str);
+            }
+            else if (msg->type == ix::WebSocketMessageType::Close)
+            {
+                cJSON *root, *message;
+                root = cJSON_CreateObject();
+                cJSON_AddStringToObject(root, "status", "disconnected");
+                message = cJSON_CreateObject();
+                cJSON_AddNumberToObject(message, "code", msg->closeInfo.code);
+                cJSON_AddStringToObject(message, "reason", msg->closeInfo.reason.c_str());
+                cJSON_AddItemToObject(root, "message", message);
+                char *json_str = cJSON_PrintUnformatted(root);
+
+                eventCallback(CONNECTION_DROPPED, json_str);
+
+                cJSON_Delete(root);
+                switch_safe_free(json_str);
+            } });
+
+        webSocket.start();
+    }
+
+    void disconnect() override
     {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "disconnecting...\n");
         webSocket.stop();
     }
 
-    bool isConnected()
+    bool isConnected() override
     {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AudioStreamer: checking connection\n");
         return (webSocket.getReadyState() == ix::ReadyState::Open);
     }
 
-    void writeBinary(uint8_t *buffer, size_t len)
+    void writeBinary(uint8_t *buffer, size_t len) override
     {
         if (!this->isConnected())
             return;
         webSocket.sendBinary(ix::IXWebSocketSendData((char *)buffer, len));
     }
 
-    void writeText(const char *text)
+    void writeText(const char *text) override
     {
         if (!this->isConnected())
             return;
         webSocket.sendUtf8Text(ix::IXWebSocketSendData(text, strlen(text)));
     }
 
-    void deleteFiles()
-    {
-        if (m_playFile > 0)
-        {
-            for (const auto &fileName : m_Files)
-            {
-                remove(fileName.c_str());
-            }
-        }
-    }
-
 private:
-    std::string m_sessionId;
-    responseHandler_t m_notify;
     ix::WebSocket webSocket;
-    const char *m_initial_meta;
-    bool m_suppress_log;
-    bool m_global_trace;
-    const char *m_extra_headers;
-    int m_playFile;
-    std::unordered_set<std::string> m_Files;
 };
 
-class TcpStreamer
+class TcpStreamer : public BaseStreamer
 {
 public:
-    TcpStreamer(const char *uuid, const char *address, int port, const char *initialMeta,
-                bool globalTrace, bool suppressLog, responseHandler_t callback, int samplingRate, int channels)
-        : m_sessionId(uuid), m_address(address), m_port(port), m_notify(callback), m_initial_meta(initialMeta),
-          m_global_trace(globalTrace), m_suppress_log(suppressLog), m_socket(-1), m_playFile(0), m_samplingRate(samplingRate), m_channels(channels)
+    TcpStreamer(const char *uuid, const char *address, int port, const char *initialMeta, bool globalTrace, bool suppressLog, responseHandler_t callback, int samplingRate, int channels)
+        : BaseStreamer(uuid, initialMeta, globalTrace, suppressLog, callback), m_address(address), m_port(port), m_socket(-1), m_samplingRate(samplingRate), m_channels(channels)
     {
-
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Initializing TCP connection to %s:%d\n", address, port);
 
         m_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -369,214 +316,46 @@ public:
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Connected to %s:%d\n", address, port);
     }
 
-    switch_bool_t processMessage(switch_core_session_t *session, std::string &message)
-    {
-        cJSON *json = cJSON_Parse(message.c_str());
-        switch_bool_t status = SWITCH_FALSE;
-        if (!json)
-        {
-            return status;
-        }
-        const char *jsType = cJSON_GetObjectCstr(json, "type");
-        if (jsType && strcmp(jsType, "streamAudio") == 0)
-        {
-            cJSON *jsonData = cJSON_GetObjectItem(json, "data");
-            if (jsonData)
-            {
-                cJSON *jsonFile = nullptr;
-                cJSON *jsonAudio = cJSON_DetachItemFromObject(jsonData, "audioData");
-                const char *jsAudioDataType = cJSON_GetObjectCstr(jsonData, "audioDataType");
-                std::string fileType;
-                int sampleRate;
-                if (0 == strcmp(jsAudioDataType, "raw"))
-                {
-                    cJSON *jsonSampleRate = cJSON_GetObjectItem(jsonData, "sampleRate");
-                    sampleRate = jsonSampleRate && jsonSampleRate->valueint ? jsonSampleRate->valueint : 0;
-                    std::unordered_map<int, const char *> sampleRateMap = {
-                        {8000, ".r8"},
-                        {16000, ".r16"},
-                        {24000, ".r24"},
-                        {32000, ".r32"},
-                        {48000, ".r48"},
-                        {64000, ".r64"}};
-                    auto it = sampleRateMap.find(sampleRate);
-                    fileType = (it != sampleRateMap.end()) ? it->second : "";
-                }
-                else if (0 == strcmp(jsAudioDataType, "wav"))
-                {
-                    fileType = ".wav";
-                }
-                else
-                {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - unsupported audio type: %s\n",
-                                      m_sessionId.c_str(), jsAudioDataType);
-                }
-
-                if (jsonAudio && jsonAudio->valuestring != nullptr && !fileType.empty())
-                {
-                    char filePath[256];
-                    std::string rawAudio = base64_decode(jsonAudio->valuestring);
-                    switch_snprintf(filePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir,
-                                    SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++, fileType.c_str());
-                    std::ofstream fstream(filePath, std::ofstream::binary);
-                    fstream << rawAudio;
-                    fstream.close();
-                    m_Files.insert(filePath);
-                    jsonFile = cJSON_CreateString(filePath);
-                    cJSON_AddItemToObject(jsonData, "file", jsonFile);
-                }
-
-                if (jsonFile)
-                {
-                    char *jsonString = cJSON_PrintUnformatted(jsonData);
-                    m_notify(session, EVENT_PLAY, jsonString);
-                    message.assign(jsonString);
-                    free(jsonString);
-                    status = SWITCH_TRUE;
-                }
-                if (jsonAudio)
-                    cJSON_Delete(jsonAudio);
-            }
-            else
-            {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - no data in streamAudio\n", m_sessionId.c_str());
-            }
-        }
-        cJSON_Delete(json);
-        return status;
-    }
-
-    void disconnect()
+    void disconnect() override
     {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "disconnecting...\n");
         close(m_socket);
     }
 
-    static void media_bug_close(switch_core_session_t *session)
+    bool isConnected() override
     {
-        switch_channel_t *channel = switch_core_session_get_channel(session);
-        auto *bug = (switch_media_bug_t *)switch_channel_get_private(channel, MY_BUG_NAME);
-        if (bug)
-            switch_core_media_bug_close(&bug, SWITCH_FALSE);
-    }
-
-    void deleteFiles()
-    {
-        if (m_playFile > 0)
-        {
-            for (const auto &fileName : m_Files)
-            {
-                remove(fileName.c_str());
-            }
-        }
-    }
-
-    void eventCallback(notifyEvent_t event, const char *message)
-    {
-        switch_core_session_t *psession = switch_core_session_locate(m_sessionId.c_str());
-        if (psession)
-        {
-            switch (event)
-            {
-            case CONNECT_SUCCESS:
-                m_notify(psession, EVENT_CONNECT, message);
-                break;
-            case CONNECTION_DROPPED:
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "connection closed\n");
-                m_notify(psession, EVENT_DISCONNECT, message);
-                break;
-            case CONNECT_ERROR:
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "connection error\n");
-                m_notify(psession, EVENT_ERROR, message);
-
-                media_bug_close(psession);
-
-                break;
-            case MESSAGE:
-                std::string msg(message);
-                if (processMessage(psession, msg) != SWITCH_TRUE)
-                {
-                    m_notify(psession, EVENT_JSON, msg.c_str());
-                }
-                if (!m_suppress_log)
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG, "response: %s\n", msg.c_str());
-                break;
-            }
-            switch_core_session_rwunlock(psession);
-        }
-    }
-
-    ~TcpStreamer()
-    {
-        if (m_socket != -1)
-        {
-            close(m_socket);
-
-            cJSON *root, *message;
-            root = cJSON_CreateObject();
-            cJSON_AddStringToObject(root, "status", "disconnected");
-            message = cJSON_CreateObject();
-            cJSON_AddNumberToObject(message, "code", 0);
-            cJSON_AddStringToObject(message, "reason", "");
-            cJSON_AddItemToObject(root, "message", message);
-            char *json_str = cJSON_PrintUnformatted(root);
-
-            eventCallback(CONNECTION_DROPPED, json_str);
-
-            cJSON_Delete(root);
-            switch_safe_free(json_str);
-
-            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Connection closed\n");
-        }
-    }
-
-    bool isConnected()
-    {
-        // switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: checking connection\n");
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: checking connection\n");
         return m_socket != -1;
     }
 
-    void writeBinary(uint8_t *buffer, size_t len)
+    void writeBinary(uint8_t *buffer, size_t len) override
     {
-        // if (this->isConnected())
-        // {
-        //     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Sending %zu bytes\n", len);
-        //     send(m_socket, buffer, len, 0);
-        // }
-        if (this->isConnected())
+        if (!this->isConnected())
+            return;
+
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Sending %zu bytes\n", len);
+
+        double expected_interval = static_cast<double>(len) / (m_samplingRate * m_channels * 2); // 2 bytes per sample for 16-bit audio
+
+        static auto last_send_time = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        std::chrono::duration<double> elapsed = now - last_send_time;
+
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Time elapsed since last send: %.6f seconds, expected interval: %.6f seconds\n", elapsed.count(), expected_interval);
+
+        if (elapsed.count() < expected_interval)
         {
-            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Sending %zu bytes\n", len);
-
-            // Calculate the expected interval based on the sample rate and channels
-            double expected_interval = static_cast<double>(len) / (m_samplingRate * m_channels * 2); // 2 bytes per sample for 16-bit audio
-
-            static auto last_send_time = std::chrono::steady_clock::now();
-            auto now = std::chrono::steady_clock::now();
-            std::chrono::duration<double> elapsed = now - last_send_time;
-
-            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Time elapsed since last send: %.6f seconds, expected interval: %.6f seconds\n", elapsed.count(), expected_interval);
-
-            if (elapsed.count() < expected_interval)
-            {
-                std::this_thread::sleep_for(std::chrono::duration<double>(expected_interval - elapsed.count()));
-                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Sleeping for %.6f seconds to match expected interval\n", expected_interval - elapsed.count());
-            }
-
-            send(m_socket, buffer, len, 0);
-            last_send_time = now;
+            std::this_thread::sleep_for(std::chrono::duration<double>(expected_interval - elapsed.count()));
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "TcpStreamer: Sleeping for %.6f seconds to match expected interval\n", expected_interval - elapsed.count());
         }
+
+        send(m_socket, buffer, len, 0);
+        last_send_time = now;
     }
 
 private:
-    std::string m_sessionId;
     const char *m_address;
     int m_port;
-    responseHandler_t m_notify;
-    const char *m_initial_meta;
-    bool m_suppress_log;
-    bool m_global_trace;
-    int m_playFile;
-    std::unordered_set<std::string> m_Files;
     int m_socket;
     int m_samplingRate;
     int m_channels;
@@ -603,7 +382,7 @@ namespace
         if (cJSON_IsString(partial))
         {
             std::string currentMsg = partial->valuestring;
-            prevMsgMutex.lock();
+            std::lock_guard<std::mutex> lock(prevMsgMutex);
             if (currentMsg == prevMsg)
             {
                 if (!sentAlready)
@@ -617,7 +396,6 @@ namespace
                 prevMsg = currentMsg;
                 send = SWITCH_TRUE;
             }
-            prevMsgMutex.unlock();
         }
         else
         {
@@ -627,18 +405,16 @@ namespace
         return send;
     }
 
-    switch_status_t stream_data_init(private_t *tech_pvt, switch_core_session_t *session, char *address, int port,
-                                     uint32_t sampling, int desiredSampling, int channels, char *metadata, responseHandler_t responseHandler,
-                                     int deflate, int heart_beat, bool globalTrace, bool suppressLog, int rtp_packets, const char *extra_headers)
+    switch_status_t stream_data_init(private_t *tech_pvt, switch_core_session_t *session, char *address, int port, uint32_t sampling, int desiredSampling, int channels, char *metadata, responseHandler_t responseHandler, int deflate, int heart_beat, bool globalTrace, bool suppressLog, int rtp_packets, const char *extra_headers)
     {
-        int err; // speex
+        int err;
 
         switch_memory_pool_t *pool = switch_core_session_get_pool(session);
 
         memset(tech_pvt, 0, sizeof(private_t));
 
         strncpy(tech_pvt->sessionId, switch_core_session_get_uuid(session), MAX_SESSION_ID);
-        strncpy(tech_pvt->ws_uri, address, MAX_WS_URI); // Fixed to use address instead of undefined wsUri
+        strncpy(tech_pvt->ws_uri, address, MAX_WS_URI);
         tech_pvt->sampling = desiredSampling;
         tech_pvt->responseHandler = responseHandler;
         tech_pvt->rtp_packets = rtp_packets;
@@ -667,21 +443,19 @@ namespace
 
         try
         {
-            size_t adjSize = 1; // adjust the buffer size to the closest pow2 size
+            size_t adjSize = 1;
             while (adjSize < buflen)
             {
                 adjSize *= 2;
             }
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s: initializing buffer(%zu) to adjusted %zu bytes\n",
-                              tech_pvt->sessionId, buflen, adjSize);
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s: initializing buffer(%zu) to adjusted %zu bytes\n", tech_pvt->sessionId, buflen, adjSize);
             tech_pvt->data = (uint8_t *)switch_core_alloc(pool, adjSize);
             tech_pvt->buffer = (RingBuffer *)switch_core_alloc(pool, sizeof(RingBuffer));
             ringBufferInit(tech_pvt->buffer, tech_pvt->data, adjSize);
         }
         catch (std::exception &e)
         {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "%s: Error initializing buffer: %s.\n",
-                              tech_pvt->sessionId, e.what());
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "%s: Error initializing buffer: %s.\n", tech_pvt->sessionId, e.what());
             return SWITCH_STATUS_FALSE;
         }
 
@@ -724,35 +498,21 @@ namespace
         }
         if (tech_pvt->pAudioStreamer)
         {
-            auto *as = (AudioStreamer *)tech_pvt->pAudioStreamer;
-            auto *ts = (TcpStreamer *)tech_pvt->pAudioStreamer;
-            strcmp(STREAM_TYPE, "TCP") == 0 ? delete ts : delete as;
+            auto *streamer = static_cast<BaseStreamer *>(tech_pvt->pAudioStreamer);
+            delete streamer;
             tech_pvt->pAudioStreamer = nullptr;
         }
     }
 
     void finish(private_t *tech_pvt)
     {
-        if (strcmp(STREAM_TYPE, "TCP") == 0)
-        {
-            std::shared_ptr<TcpStreamer> tStreamer;
-            tStreamer.reset((TcpStreamer *)tech_pvt->pAudioStreamer);
-            tech_pvt->pAudioStreamer = nullptr;
+        std::shared_ptr<BaseStreamer> streamer;
+        streamer.reset(static_cast<BaseStreamer *>(tech_pvt->pAudioStreamer));
+        tech_pvt->pAudioStreamer = nullptr;
 
-            std::thread t([tStreamer]
-                          { tStreamer->disconnect(); });
-            t.detach();
-        }
-        else
-        {
-            std::shared_ptr<AudioStreamer> aStreamer;
-            aStreamer.reset((AudioStreamer *)tech_pvt->pAudioStreamer);
-            tech_pvt->pAudioStreamer = nullptr;
-
-            std::thread t([aStreamer]
-                          { aStreamer->disconnect(); });
-            t.detach();
-        }
+        std::thread t([streamer]
+                      { streamer->disconnect(); });
+        t.detach();
     }
 
 }
@@ -766,7 +526,6 @@ extern "C"
         const char *hostEnd = nullptr;
         const char *portStart = nullptr;
 
-        // Check scheme
         if (strncmp(url, "ws://", 5) == 0)
         {
             scheme = "ws";
@@ -782,7 +541,6 @@ extern "C"
             return 0;
         }
 
-        // Find host end or port start
         hostEnd = hostStart;
         while (*hostEnd && *hostEnd != ':' && *hostEnd != '/')
         {
@@ -793,13 +551,11 @@ extern "C"
             ++hostEnd;
         }
 
-        // Check if host is empty
         if (hostStart == hostEnd)
         {
             return 0;
         }
 
-        // Check for port
         if (*hostEnd == ':')
         {
             portStart = hostEnd + 1;
@@ -813,7 +569,6 @@ extern "C"
             }
         }
 
-        // Copy valid URI to wsUri
         std::strncpy(wsUri, url, MAX_WS_URI);
         return 1;
     }
@@ -825,12 +580,10 @@ extern "C"
         {
             if ((*str & 0x80) == 0x00)
             {
-                // 1-byte character
                 str++;
             }
             else if ((*str & 0xE0) == 0xC0)
             {
-                // 2-byte character
                 if ((str[1] & 0xC0) != 0x80)
                 {
                     return status;
@@ -839,7 +592,6 @@ extern "C"
             }
             else if ((*str & 0xF0) == 0xE0)
             {
-                // 3-byte character
                 if ((str[1] & 0xC0) != 0x80 || (str[2] & 0xC0) != 0x80)
                 {
                     return status;
@@ -848,7 +600,6 @@ extern "C"
             }
             else if ((*str & 0xF8) == 0xF0)
             {
-                // 4-byte character
                 if ((str[1] & 0xC0) != 0x80 || (str[2] & 0xC0) != 0x80 || (str[3] & 0xC0) != 0x80)
                 {
                     return status;
@@ -857,7 +608,6 @@ extern "C"
             }
             else
             {
-                // invalid character
                 return status;
             }
         }
@@ -903,14 +653,13 @@ extern "C"
         return newPort;
     }
 
-    int validate_address(const char *address, char *wsUri, char *tcpAddress, int *port) // Corrected port type
+    int validate_address(const char *address, char *wsUri, char *tcpAddress, int *port)
     {
         const char *scheme = nullptr;
         const char *hostStart = nullptr;
         const char *hostEnd = nullptr;
         const char *portStart = nullptr;
 
-        // Check scheme for WS
         if (strncmp(address, "ws://", 5) == 0 || strncmp(address, "wss://", 6) == 0)
         {
             return validate_ws_uri(address, wsUri);
@@ -935,7 +684,7 @@ extern "C"
 
         if (!tech_pvt)
             return SWITCH_STATUS_FALSE;
-        auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
+        auto *pAudioStreamer = static_cast<BaseStreamer *>(tech_pvt->pAudioStreamer);
         if (pAudioStreamer && text)
             pAudioStreamer->writeText(text);
 
@@ -961,16 +710,7 @@ extern "C"
         return SWITCH_STATUS_SUCCESS;
     }
 
-    switch_status_t stream_session_init(switch_core_session_t *session,
-                                        responseHandler_t responseHandler,
-                                        uint32_t samples_per_second,
-                                        char *address,
-                                        int port,
-                                        int sampling,
-                                        int channels,
-                                        char *metadata,
-                                        void **ppUserData,
-                                        const char *streamType)
+    switch_status_t stream_session_init(switch_core_session_t *session, responseHandler_t responseHandler, uint32_t samples_per_second, char *address, int port, int sampling, int channels, char *metadata, void **ppUserData, const char *streamType)
     {
         int deflate = 0, heart_beat = 0;
         bool globalTrace = false;
@@ -1012,8 +752,7 @@ extern "C"
             int bSize = atoi(buffer_size);
             if (bSize % 20 != 0)
             {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "%s: Buffer size of %s is not a multiple of 20ms. Using default 20ms.\n",
-                                  switch_channel_get_name(channel), buffer_size);
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "%s: Buffer size of %s is not a multiple of 20ms. Using default 20ms.\n", switch_channel_get_name(channel), buffer_size);
             }
             else if (bSize >= 20)
             {
@@ -1023,7 +762,6 @@ extern "C"
 
         extra_headers = switch_channel_get_variable(channel, "STREAM_EXTRA_HEADERS");
 
-        // allocate per-session tech_pvt
         auto *tech_pvt = (private_t *)switch_core_session_alloc(session, sizeof(private_t));
 
         if (!tech_pvt)
@@ -1031,8 +769,7 @@ extern "C"
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "error allocating memory!\n");
             return SWITCH_STATUS_FALSE;
         }
-        if (SWITCH_STATUS_SUCCESS != stream_data_init(tech_pvt, session, address, port, samples_per_second, sampling, channels, metadata, responseHandler, deflate, heart_beat,
-                                                      globalTrace, suppressLog, rtp_packets, extra_headers))
+        if (SWITCH_STATUS_SUCCESS != stream_data_init(tech_pvt, session, address, port, samples_per_second, sampling, channels, metadata, responseHandler, deflate, heart_beat, globalTrace, suppressLog, rtp_packets, extra_headers))
         {
             destroy_tech_pvt(tech_pvt);
             return SWITCH_STATUS_FALSE;
@@ -1063,7 +800,6 @@ extern "C"
 
             if (strcmp(STREAM_TYPE, "TCP") == 0 ? !pTcpStreamer->isConnected() : !pAudioStreamer->isConnected())
             {
-                // switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "stream_frame: audio streamer is not connected\n");
                 switch_mutex_unlock(tech_pvt->mutex);
                 return SWITCH_TRUE;
             }
