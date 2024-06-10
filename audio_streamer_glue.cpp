@@ -6,7 +6,6 @@
 #include <switch_json.h>
 #include <fstream>
 #include <switch_buffer.h>
-#include <switch_buffer.h>
 #include <unordered_map>
 #include <unordered_set>
 #include "base64.h"
@@ -657,11 +656,20 @@ extern "C" {
                         spx_uint32_t out_len = (available / (tech_pvt->channels * sizeof(spx_int16_t)));
                         spx_int16_t out[available / sizeof(spx_int16_t)];
 
-                        speex_resampler_process_interleaved_int(tech_pvt->resampler,
-                                (const spx_int16_t *)frame.data,
-                                (spx_uint32_t *) &in_len,
-                                &out[0],
-                                &out_len);
+                        if(tech_pvt->channels == 1) {
+                            speex_resampler_process_int(tech_pvt->resampler,
+                                            0,
+                                            (const spx_int16_t *)frame.data,
+                                            &in_len,
+                                            &out[0],
+                                            &out_len);
+                        } else {
+                            speex_resampler_process_interleaved_int(tech_pvt->resampler,
+                                            (const spx_int16_t *)frame.data,
+                                            &in_len,
+                                            &out[0],
+                                            &out_len);
+                        }
 
                         if(out_len > 0) {
                             const size_t bytes_written = out_len * tech_pvt->channels * sizeof(spx_int16_t);
