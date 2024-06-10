@@ -5,6 +5,8 @@
 
 #include <switch_json.h>
 #include <fstream>
+#include <switch_buffer.h>
+#include <switch_buffer.h>
 #include <unordered_map>
 #include <unordered_set>
 #include "base64.h"
@@ -317,7 +319,7 @@ namespace {
         if (metadata) strncpy(tech_pvt->initialMetadata, metadata, MAX_METADATA_LEN);
 
         //size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PERIOD * BUFFERED_SEC);
-        size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * rtp_packets);
+        const size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * rtp_packets);
 
         auto* as = new AudioStreamer(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat, metadata, globalTrace, suppressLog, extra_headers);
 
@@ -325,20 +327,34 @@ namespace {
 
         switch_mutex_init(&tech_pvt->mutex, SWITCH_MUTEX_NESTED, pool);
 
-        try {
+        if (desiredSampling != sampling) {
+            if (switch_buffer_create(pool, &tech_pvt->sbuffer, buflen) != SWITCH_STATUS_SUCCESS) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                    "%s: Error creating switch buffer.\n", tech_pvt->sessionId);
+                return SWITCH_STATUS_FALSE;
+            }
+        } else {
             size_t adjSize = 1; //adjust the buffer size to the closest pow2 size
             while(adjSize < buflen) {
-                adjSize *=2;
+                adjSize *= 2;
             }
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s: initializing buffer(%zu) to adjusted %zu bytes\n",
-                              tech_pvt->sessionId, buflen, adjSize);
+                          tech_pvt->sessionId, buflen, adjSize);
             tech_pvt->data = (uint8_t *) switch_core_alloc(pool, adjSize);
+            if (!tech_pvt->data) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                                  "%s: Error allocating memory for data buffer.\n", tech_pvt->sessionId);
+                return SWITCH_STATUS_FALSE;
+            }
+            memset(tech_pvt->data, 0, adjSize);
             tech_pvt->buffer = (RingBuffer *) switch_core_alloc(pool, sizeof(RingBuffer));
+            if (!tech_pvt->buffer) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                                  "%s: Error allocating memory for ring buffer.\n", tech_pvt->sessionId);
+                return SWITCH_STATUS_FALSE;
+            }
+            memset(tech_pvt->buffer, 0, sizeof(RingBuffer));
             ringBufferInit(tech_pvt->buffer, tech_pvt->data, adjSize);
-        } catch (std::exception& e) {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "%s: Error initializing buffer: %s.\n",
-                              tech_pvt->sessionId, e.what());
-            return SWITCH_STATUS_FALSE;
         }
 
         if (desiredSampling != sampling) {
@@ -633,13 +649,13 @@ extern "C" {
                 switch_frame_t frame = {};
                 frame.data = data;
                 frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
-                size_t available = ringBufferFreeSpace(tech_pvt->buffer);
+                const size_t available = switch_buffer_freespace(tech_pvt->sbuffer);
 
                 while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
                     if(frame.datalen) {
                         spx_uint32_t in_len = frame.samples;
-                        spx_uint32_t out_len = available >> 1;
-                        spx_int16_t out[available];
+                        spx_uint32_t out_len = (available / (tech_pvt->channels * sizeof(spx_int16_t)));
+                        spx_int16_t out[available / sizeof(spx_int16_t)];
 
                         speex_resampler_process_interleaved_int(tech_pvt->resampler,
                                 (const spx_int16_t *)frame.data,
@@ -647,51 +663,24 @@ extern "C" {
                                 &out[0],
                                 &out_len);
 
-                        size_t remaining = 0;
-
                         if(out_len > 0) {
-                            size_t bytes_written = out_len << tech_pvt->channels;
-                            if (1 == tech_pvt->rtp_packets) {
+                            const size_t bytes_written = out_len * tech_pvt->channels * sizeof(spx_int16_t);
+                            if (tech_pvt->rtp_packets == 1) { //20ms packet
                                 pAudioStreamer->writeBinary((uint8_t *) out, bytes_written);
                                 continue;
                             }
                             if (bytes_written <= available) {
-                                // Case 1: Resampled data fits entirely in the buffer
-                                ringBufferAppendMultiple(tech_pvt->buffer, (const uint8_t *)out, bytes_written);
-                            } else {
-                                // Case 2: Resampled data partially fits in the buffer
-                                ringBufferAppendMultiple(tech_pvt->buffer, (const uint8_t *)out, available);
-                                remaining = bytes_written - available;
-                            }
-
-                            // Update available space in the buffer
-                            available -= bytes_written;
-                            if(available <= 2) {
-
-                                spx_uint32_t in_len_rem = frame.samples-in_len;
-                                spx_uint32_t out_len_rem = SWITCH_RECOMMENDED_BUFFER_SIZE;
-                                spx_int16_t out_rem[SWITCH_RECOMMENDED_BUFFER_SIZE];
-                                speex_resampler_process_interleaved_int(tech_pvt->resampler,
-                                                                        (const spx_int16_t *)frame.data+in_len, //in_len_rem
-                                                                        (spx_uint32_t *) &in_len_rem,
-                                                                        &out_rem[0],
-                                                                        &out_len_rem);
-                                if(out_len_rem > 0) {
-                                    size_t rem_bytes = out_len_rem << tech_pvt->channels;
-                                    //size_t rem_bytes = out_len_rem * tech_pvt->channels * sizeof(spx_int16_t);
-                                    size_t bufferLen = ringBufferLen(tech_pvt->buffer);
-                                    size_t nFrames = bufferLen + rem_bytes;
-                                    uint8_t bufferPtr[nFrames];
-                                    ringBufferGetMultiple(tech_pvt->buffer, &bufferPtr[0], bufferLen);
-                                    //size_t lastFrame = bytes_written + rem_bytes;
-                                    memcpy(&bufferPtr[bufferLen], (uint8_t*)&out_rem[0], rem_bytes);
-                                    ringBufferClear(tech_pvt->buffer);
-                                    pAudioStreamer->writeBinary(&bufferPtr[0], nFrames);
-                                }
-
+                                switch_buffer_write(tech_pvt->sbuffer, (const uint8_t *)out, bytes_written);
                             }
                         }
 
+                        if(switch_buffer_freespace(tech_pvt->sbuffer) == 0) {
+                            const switch_size_t buf_len= switch_buffer_inuse(tech_pvt->sbuffer);
+                            uint8_t buf_ptr[buf_len];
+                            switch_buffer_read(tech_pvt->sbuffer, buf_ptr, buf_len);
+                            switch_buffer_zero(tech_pvt->sbuffer);
+                            pAudioStreamer->writeBinary(buf_ptr, buf_len);
+                        }
                     }
                 }
             }
