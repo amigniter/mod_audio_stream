@@ -189,6 +189,10 @@ public:
                     fileType = (it != sampleRateMap.end()) ? it->second : "";
                 } else if (0 == strcmp(jsAudioDataType, "wav")) {
                     fileType = ".wav";
+                } else if (0 == strcmp(jsAudioDataType, "mp3")) {
+                    fileType = ".mp3";
+                } else if (0 == strcmp(jsAudioDataType, "ogg")) {
+                    fileType = ".ogg";
                 } else {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - unsupported audio type: %s\n",
                                       m_sessionId.c_str(), jsAudioDataType);
