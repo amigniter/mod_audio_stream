@@ -199,12 +199,14 @@ SWITCH_STANDARD_API(stream_function)
                     switch_core_session_rwunlock(lsession);
                     goto done;
                 }
-                if (0 == strcmp(argv[4], "16k")) {
-                    sampling = 16000;
-                } else if (0 == strcmp(argv[4], "8k")) {
-                    sampling = 8000;
-                } else {
-                    sampling = atoi(argv[4]);
+                if (argc > 4) {
+                    if (0 == strcmp(argv[4], "16k")) {
+                        sampling = 16000;
+                    } else if (0 == strcmp(argv[4], "8k")) {
+                        sampling = 8000;
+                    } else {
+                        sampling = atoi(argv[4]);
+                    }
                 }
                 if (!validate_ws_uri(argv[2], &wsUri[0])) {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
