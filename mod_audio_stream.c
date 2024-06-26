@@ -30,7 +30,7 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
         case SWITCH_ABC_TYPE_CLOSE:
             {
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Got SWITCH_ABC_TYPE_CLOSE.\n");
-                stream_session_cleanup(session, NULL, 1);
+                stream_session_cleanup(session, NULL, 0);
             }
             break;
 
