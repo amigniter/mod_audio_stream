@@ -28,6 +28,7 @@ struct private_data {
     int sampling;
     int channels;
     int audio_paused:1;
+    int close_requested:1;
     char initialMetadata[8192];
     RingBuffer *buffer;
     switch_buffer_t *sbuffer;

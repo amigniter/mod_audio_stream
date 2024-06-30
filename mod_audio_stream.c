@@ -22,6 +22,7 @@ static void responseHandler(switch_core_session_t* session, const char* eventNam
 static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, switch_abc_type_t type)
 {
     switch_core_session_t *session = switch_core_media_bug_get_session(bug);
+    private_t *tech_pvt = (private_t *)user_data;
 
     switch (type) {
         case SWITCH_ABC_TYPE_INIT:
@@ -30,11 +31,16 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
         case SWITCH_ABC_TYPE_CLOSE:
             {
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Got SWITCH_ABC_TYPE_CLOSE.\n");
-                stream_session_cleanup(session, NULL, 0);
+                // Check if this is a normal channel closure or a requested closure
+                int channelIsClosing = tech_pvt->close_requested ? 0 : 1;
+                stream_session_cleanup(session, NULL, channelIsClosing);
             }
             break;
 
         case SWITCH_ABC_TYPE_READ:
+            if (tech_pvt->close_requested) {
+                return SWITCH_FALSE;
+            }
             return stream_frame(bug);
             break;
 

@@ -119,7 +119,11 @@ public:
     static void media_bug_close(switch_core_session_t *session) {
         switch_channel_t *channel = switch_core_session_get_channel(session);
         auto *bug = (switch_media_bug_t *) switch_channel_get_private(channel, MY_BUG_NAME);
-        if(bug) switch_core_media_bug_close(&bug, SWITCH_FALSE);
+        if(bug) {
+            auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
+            tech_pvt->close_requested = 1;
+            switch_core_media_bug_close(&bug, SWITCH_FALSE);
+        }
     }
 
     void eventCallback(notifyEvent_t event, const char* message) {
