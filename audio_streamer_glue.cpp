@@ -307,7 +307,7 @@ namespace {
 
     switch_status_t stream_data_init(private_t *tech_pvt, switch_core_session_t *session, char *wsUri,
                                      uint32_t sampling, int desiredSampling, int channels, char *metadata, responseHandler_t responseHandler,
-                                     int deflate, int heart_beat, bool globalTrace, bool suppressLog, int rtp_packets, const char* extra_headers)
+                                     int deflate, int heart_beat, bool globalTrace, bool suppressLog, int rtp_packets, const char* extra_headers, int b64_audio)
     {
         int err; //speex
 
@@ -322,6 +322,7 @@ namespace {
         tech_pvt->rtp_packets = rtp_packets;
         tech_pvt->channels = channels;
         tech_pvt->audio_paused = 0;
+        tech_pvt->b64_audio = b64_audio;
 
         if (metadata) strncpy(tech_pvt->initialMetadata, metadata, MAX_METADATA_LEN);
 
@@ -409,6 +410,31 @@ namespace {
         t.detach();
     }
 
+    void add_encoded_audio_json(cJSON* jsonObject, const char* audioData, size_t dataLength, 
+                           uint32_t sampleRate, uint32_t channels) {
+        
+        std::string encodedAudio = base64_encode(audioData, dataLength);
+
+        cJSON_AddStringToObject(jsonObject, "audioDataType", "raw");
+        cJSON_AddNumberToObject(jsonObject, "sampleRate", sampleRate);
+        cJSON_AddNumberToObject(jsonObject, "channels", channels);
+        cJSON_AddStringToObject(jsonObject, "audioData", encodedAudio.c_str());
+    }
+
+    char* create_encoded_audio_json(const uint8_t* audioData, size_t dataLength, 
+                                uint32_t sampleRate, uint32_t channels) {
+        cJSON* jsonObject = cJSON_CreateObject();
+        if (!jsonObject) {
+            return nullptr;
+        }
+
+        add_encoded_audio_json(jsonObject, (char *)audioData, dataLength, sampleRate, channels);
+
+        char* jsonString = cJSON_PrintUnformatted(jsonObject);
+        cJSON_Delete(jsonObject);
+
+        return jsonString;
+    }
 }
 
 extern "C" {
@@ -532,7 +558,7 @@ extern "C" {
                                         char* metadata,
                                         void **ppUserData)
     {
-        int deflate, heart_beat;
+        int deflate, heart_beat, b64_audio;
         bool globalTrace = false;
         bool suppressLog = false;
         const char* buffer_size;
@@ -551,6 +577,10 @@ extern "C" {
 
         if (switch_channel_var_true(channel, "STREAM_SUPPRESS_LOG")) {
             suppressLog = true;
+        }
+
+        if (switch_channel_var_true(channel, "STREAM_B64_AUDIO")) {
+            b64_audio = 1;
         }
 
         const char* heartBeat = switch_channel_get_variable(channel, "STREAM_HEART_BEAT");
@@ -582,7 +612,7 @@ extern "C" {
             return SWITCH_STATUS_FALSE;
         }
         if (SWITCH_STATUS_SUCCESS != stream_data_init(tech_pvt, session, wsUri, samples_per_second, sampling, channels, metadata, responseHandler, deflate, heart_beat,
-                                                        globalTrace, suppressLog, rtp_packets, extra_headers)) {
+                                                        globalTrace, suppressLog, rtp_packets, extra_headers, b64_audio)) {
             destroy_tech_pvt(tech_pvt);
             return SWITCH_STATUS_FALSE;
         }
@@ -620,7 +650,15 @@ extern "C" {
                 while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
                     if(frame.datalen) {
                         if (1 == tech_pvt->rtp_packets) {
-                            pAudioStreamer->writeBinary((uint8_t *) frame.data, frame.datalen);
+                            if (tech_pvt->b64_audio) {
+                                char* jsonString = create_encoded_audio_json((uint8_t *)frame.data, frame.datalen, tech_pvt->sampling, tech_pvt->channels);
+                                if (jsonString) {
+                                    pAudioStreamer->writeText(jsonString);
+                                    free(jsonString);
+                                }
+                            } else {
+                                pAudioStreamer->writeBinary((uint8_t *) frame.data, frame.datalen);
+                            }
                             continue;
                         }
 
@@ -644,7 +682,15 @@ extern "C" {
                                 memcpy(&chunkPtr[nBytes - remaining], static_cast<uint8_t *>(frame.data) + frame.datalen - remaining, remaining);
                             }
 
-                            pAudioStreamer->writeBinary(chunkPtr, nBytes);
+                            if (tech_pvt->b64_audio) {
+                                char* jsonString = create_encoded_audio_json(chunkPtr, nBytes, tech_pvt->sampling, tech_pvt->channels);
+                                if (jsonString) {
+                                    pAudioStreamer->writeText(jsonString);
+                                    free(jsonString);
+                                }
+                            } else { 
+                                pAudioStreamer->writeBinary(chunkPtr, nBytes);
+                            }
 
                             ringBufferClear(tech_pvt->buffer);
                         }
@@ -682,7 +728,15 @@ extern "C" {
                         if(out_len > 0) {
                             const size_t bytes_written = out_len * tech_pvt->channels * sizeof(spx_int16_t);
                             if (tech_pvt->rtp_packets == 1) { //20ms packet
-                                pAudioStreamer->writeBinary((uint8_t *) out, bytes_written);
+                                if (tech_pvt->b64_audio) {
+                                    char* jsonString = create_encoded_audio_json((uint8_t *)out, bytes_written, tech_pvt->sampling, tech_pvt->channels);
+                                    if (jsonString) {
+                                        pAudioStreamer->writeText(jsonString);
+                                        free(jsonString);
+                                    }
+                                } else {
+                                    pAudioStreamer->writeBinary((uint8_t *) out, bytes_written);
+                                }
                                 continue;
                             }
                             if (bytes_written <= available) {
@@ -695,7 +749,15 @@ extern "C" {
                             uint8_t buf_ptr[buf_len];
                             switch_buffer_read(tech_pvt->sbuffer, buf_ptr, buf_len);
                             switch_buffer_zero(tech_pvt->sbuffer);
-                            pAudioStreamer->writeBinary(buf_ptr, buf_len);
+                            if (tech_pvt->b64_audio) {
+                                char* jsonString = create_encoded_audio_json(buf_ptr, buf_len, tech_pvt->sampling, tech_pvt->channels);
+                                if (jsonString) {
+                                    pAudioStreamer->writeText(jsonString);
+                                    free(jsonString);
+                                }
+                            } else {
+                                pAudioStreamer->writeBinary(buf_ptr, buf_len);
+                            }
                         }
                     }
                 }
