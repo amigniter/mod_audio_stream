@@ -413,7 +413,8 @@ namespace {
     void add_encoded_audio_json(cJSON* jsonObject, const char* audioData, size_t dataLength, 
                            uint32_t sampleRate, uint32_t channels) {
         
-        std::string encodedAudio = base64_encode(audioData, dataLength);
+        std::string audioDataStr(reinterpret_cast<const char*>(audioData), dataLength);
+        std::string encodedAudio = base64_encode(audioDataStr);
 
         cJSON_AddStringToObject(jsonObject, "audioDataType", "raw");
         cJSON_AddNumberToObject(jsonObject, "sampleRate", sampleRate);
