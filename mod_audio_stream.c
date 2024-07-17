@@ -263,9 +263,12 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
         return SWITCH_STATUS_TERM;
     }
     SWITCH_ADD_API(api_interface, "uuid_audio_stream", "audio_stream API", stream_function, STREAM_API_SYNTAX);
-    switch_console_set_complete("add uuid_audio_stream start wss-url metadata");
-    switch_console_set_complete("add uuid_audio_stream start wss-url");
-    switch_console_set_complete("add uuid_audio_stream stop");
+    switch_console_set_complete("add uuid_audio_stream ::console::list_uuid start wss-url metadata");
+    switch_console_set_complete("add uuid_audio_stream ::console::list_uuid start wss-url");
+    switch_console_set_complete("add uuid_audio_stream ::console::list_uuid stop");
+    switch_console_set_complete("add uuid_audio_stream ::console::list_uuid pause");
+    switch_console_set_complete("add uuid_audio_stream ::console::list_uuid resume");
+    switch_console_set_complete("add uuid_audio_stream ::console::list_uuid send_text");
 
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_audio_stream API successfully loaded\n");
 
