@@ -204,14 +204,18 @@ public:
                 if(jsonAudio && jsonAudio->valuestring != nullptr && !fileType.empty()) {
                     char filePath[256];
                     std::string rawAudio = base64_decode(jsonAudio->valuestring);
-                    switch_snprintf(filePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir,
-                                    SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++, fileType.c_str());
-                    std::ofstream fstream(filePath, std::ofstream::binary);
-                    fstream << rawAudio;
-                    fstream.close();
-                    m_Files.insert(filePath);
-                    jsonFile = cJSON_CreateString(filePath);
-                    cJSON_AddItemToObject(jsonData, "file", jsonFile);
+                    if(rawAudio.empty()) {
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - failed to decode audio\n", m_sessionId.c_str());
+                    } else {
+                        switch_snprintf(filePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir,
+                                        SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++, fileType.c_str());
+                        std::ofstream fstream(filePath, std::ofstream::binary);
+                        fstream << rawAudio;
+                        fstream.close();
+                        m_Files.insert(filePath);
+                        jsonFile = cJSON_CreateString(filePath);
+                        cJSON_AddItemToObject(jsonData, "file", jsonFile);
+                    }
                 }
 
                 if(jsonFile) {

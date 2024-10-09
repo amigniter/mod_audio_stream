@@ -204,12 +204,22 @@ static std::string decode(String const& encoded_string, bool remove_linebreaks) 
     // The last chunk produces at least one and up to three bytes.
     //
 
-       size_t pos_of_char_1 = pos_of_char(encoded_string.at(pos+1) );
+       size_t pos_of_char_0, pos_of_char_1, pos_of_char_2, pos_of_char_3;
+
+       // Return an empty string if the input is not valid base64
+       try {
+          pos_of_char_0 = pos_of_char(encoded_string.at(pos+0) );
+          pos_of_char_1 = pos_of_char(encoded_string.at(pos+1) );
+          pos_of_char_2 = pos_of_char(encoded_string.at(pos+2) );
+          pos_of_char_3 = pos_of_char(encoded_string.at(pos+3) );
+       } catch(const std::runtime_error& error) {
+          return "";
+       }
 
     //
     // Emit the first output byte that is produced in each chunk:
     //
-       ret.push_back(static_cast<std::string::value_type>( ( (pos_of_char(encoded_string.at(pos+0)) ) << 2 ) + ( (pos_of_char_1 & 0x30 ) >> 4)));
+       ret.push_back(static_cast<std::string::value_type>( ( (pos_of_char_0) << 2 ) + ( (pos_of_char_1 & 0x30 ) >> 4)));
 
        if ( ( pos + 2 < length_of_string  )       &&  // Check for data that is not padded with equal signs (which is allowed by RFC 2045)
               encoded_string.at(pos+2) != '='     &&
@@ -219,7 +229,6 @@ static std::string decode(String const& encoded_string, bool remove_linebreaks) 
        //
        // Emit a chunk's second byte (which might not be produced in the last chunk).
        //
-          unsigned int pos_of_char_2 = pos_of_char(encoded_string.at(pos+2) );
           ret.push_back(static_cast<std::string::value_type>( (( pos_of_char_1 & 0x0f) << 4) + (( pos_of_char_2 & 0x3c) >> 2)));
 
           if ( ( pos + 3 < length_of_string )     &&
@@ -230,7 +239,7 @@ static std::string decode(String const& encoded_string, bool remove_linebreaks) 
           //
           // Emit a chunk's third byte (which might not be produced in the last chunk).
           //
-             ret.push_back(static_cast<std::string::value_type>( ( (pos_of_char_2 & 0x03 ) << 6 ) + pos_of_char(encoded_string.at(pos+3))   ));
+             ret.push_back(static_cast<std::string::value_type>( ( (pos_of_char_2 & 0x03 ) << 6 ) + pos_of_char_3   ));
           }
        }
 
