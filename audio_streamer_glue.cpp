@@ -112,6 +112,8 @@ public:
             }
         });
 
+        switch_core_session_rwunlock(psession);
+
         // Now that our callback is setup, we can start our background thread and receive messages
         webSocket.start();
     }
