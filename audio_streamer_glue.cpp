@@ -19,8 +19,8 @@ namespace {
 class AudioStreamer {
 public:
 
-    AudioStreamer(const char* uuid, const char* wsUri, responseHandler_t callback, int deflate, int heart_beat, const char* initialMeta,
-                    bool globalTrace, bool suppressLog, const char* extra_headers): m_sessionId(uuid), m_notify(callback), m_initial_meta(initialMeta),
+    AudioStreamer(const char* uuid, const char* wsUri, responseHandler_t callback, int deflate, int heart_beat,
+                    bool globalTrace, bool suppressLog, const char* extra_headers): m_sessionId(uuid), m_notify(callback),
                     m_global_trace(globalTrace), m_suppress_log(suppressLog), m_extra_headers(extra_headers), m_playFile(0){
 
         ix::WebSocketHttpHeaders headers;
@@ -116,13 +116,33 @@ public:
         webSocket.start();
     }
 
-    static void media_bug_close(switch_core_session_t *session) {
+    switch_media_bug_t *get_media_bug(switch_core_session_t *session) {
         switch_channel_t *channel = switch_core_session_get_channel(session);
+        if(!channel) {
+            return nullptr;
+        }
         auto *bug = (switch_media_bug_t *) switch_channel_get_private(channel, MY_BUG_NAME);
+        return bug;
+    }
+
+    inline void media_bug_close(switch_core_session_t *session) {
+        auto *bug = get_media_bug(session);
         if(bug) {
             auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
             tech_pvt->close_requested = 1;
             switch_core_media_bug_close(&bug, SWITCH_FALSE);
+        }
+    }
+
+    inline void send_initial_metadata(switch_core_session_t *session) {
+        auto *bug = get_media_bug(session);
+        if(bug) {
+            auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
+            if(tech_pvt && strlen(tech_pvt->initialMetadata) > 0) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                                          "sending initial metadata %s\n", tech_pvt->initialMetadata);
+                writeText(tech_pvt->initialMetadata);
+            }
         }
     }
 
@@ -131,11 +151,7 @@ public:
         if(psession) {
             switch (event) {
                 case CONNECT_SUCCESS:
-                    if (m_initial_meta && strlen(m_initial_meta) > 0) {
-                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
-                                          "sending initial metadata %s\n", m_initial_meta);
-                        writeText(m_initial_meta);
-                    }
+                    send_initial_metadata(psession);
                     m_notify(psession, EVENT_CONNECT, message);
                     break;
                 case CONNECTION_DROPPED:
@@ -265,7 +281,6 @@ private:
     std::string m_sessionId;
     responseHandler_t m_notify;
     ix::WebSocket webSocket;
-    const char* m_initial_meta;
     bool m_suppress_log;
     bool m_global_trace;
     const char* m_extra_headers;
@@ -328,7 +343,7 @@ namespace {
         //size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PERIOD * BUFFERED_SEC);
         const size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * rtp_packets);
 
-        auto* as = new AudioStreamer(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat, metadata, globalTrace, suppressLog, extra_headers);
+        auto* as = new AudioStreamer(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat, globalTrace, suppressLog, extra_headers);
 
         tech_pvt->pAudioStreamer = static_cast<void *>(as);
 
