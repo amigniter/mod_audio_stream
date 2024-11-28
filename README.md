@@ -46,6 +46,7 @@ The following channel variables can be used to fine tune websocket connection an
 | STREAM_SUPPRESS_LOG    | true or 1, suppresses printing to log               | off     |
 | STREAM_BUFFER_SIZE     | buffer duration in milliseconds, divisible by 20    | 20      |
 | STREAM_EXTRA_HEADERS   | JSON object for additional headers in string format | none    |
+| STREAM_NO_RECONNECT    | true or 1, disables automatic websocket reconnection| off     |
 
 - Per message deflate compression option is enabled by default. It can lead to a very nice bandwidth savings. To disable it set the channel var to `true|1`.
 - Heart beat, sent every xx seconds when there is no traffic to make sure that load balancers do not kill an idle connection.
@@ -59,6 +60,7 @@ you would set this variable to 100. If ommited, default packet size of 20ms will
       "Header2": "Value2",
       "Header3": "Value3"
   }
+- Websocket automatic reconnection is on by default. To disable it set this channel variable to true or 1.
 
 ## API
 

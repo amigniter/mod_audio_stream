@@ -20,7 +20,7 @@ class AudioStreamer {
 public:
 
     AudioStreamer(const char* uuid, const char* wsUri, responseHandler_t callback, int deflate, int heart_beat,
-                    bool globalTrace, bool suppressLog, const char* extra_headers): m_sessionId(uuid), m_notify(callback),
+                    bool globalTrace, bool suppressLog, const char* extra_headers, bool no_reconnect): m_sessionId(uuid), m_notify(callback),
                     m_global_trace(globalTrace), m_suppress_log(suppressLog), m_extra_headers(extra_headers), m_playFile(0){
 
         ix::WebSocketHttpHeaders headers;
@@ -52,6 +52,9 @@ public:
         // Set extra headers if any
         if(!headers.empty())
             webSocket.setExtraHeaders(headers);
+
+        if(no_reconnect)
+            webSocket.disableAutomaticReconnection();
 
         // Setup a callback to be fired when a message or an event (open, close, error) is received
         webSocket.setOnMessageCallback([this](const ix::WebSocketMessagePtr& msg){
@@ -322,7 +325,8 @@ namespace {
 
     switch_status_t stream_data_init(private_t *tech_pvt, switch_core_session_t *session, char *wsUri,
                                      uint32_t sampling, int desiredSampling, int channels, char *metadata, responseHandler_t responseHandler,
-                                     int deflate, int heart_beat, bool globalTrace, bool suppressLog, int rtp_packets, const char* extra_headers)
+                                     int deflate, int heart_beat, bool globalTrace, bool suppressLog, int rtp_packets, const char* extra_headers,
+                                     bool no_reconnect)
     {
         int err; //speex
 
@@ -343,7 +347,7 @@ namespace {
         //size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PERIOD * BUFFERED_SEC);
         const size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * rtp_packets);
 
-        auto* as = new AudioStreamer(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat, globalTrace, suppressLog, extra_headers);
+        auto* as = new AudioStreamer(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat, globalTrace, suppressLog, extra_headers, no_reconnect);
 
         tech_pvt->pAudioStreamer = static_cast<void *>(as);
 
@@ -553,6 +557,7 @@ extern "C" {
         const char* buffer_size;
         const char* extra_headers;
         int rtp_packets = 1;
+        bool no_reconnect = false;
 
         switch_channel_t *channel = switch_core_session_get_channel(session);
 
@@ -566,6 +571,10 @@ extern "C" {
 
         if (switch_channel_var_true(channel, "STREAM_SUPPRESS_LOG")) {
             suppressLog = true;
+        }
+
+        if (switch_channel_var_true(channel, "STREAM_NO_RECONNECT")) {
+            no_reconnect = true;
         }
 
         const char* heartBeat = switch_channel_get_variable(channel, "STREAM_HEART_BEAT");
@@ -597,7 +606,7 @@ extern "C" {
             return SWITCH_STATUS_FALSE;
         }
         if (SWITCH_STATUS_SUCCESS != stream_data_init(tech_pvt, session, wsUri, samples_per_second, sampling, channels, metadata, responseHandler, deflate, heart_beat,
-                                                        globalTrace, suppressLog, rtp_packets, extra_headers)) {
+                                                        globalTrace, suppressLog, rtp_packets, extra_headers, no_reconnect)) {
             destroy_tech_pvt(tech_pvt);
             return SWITCH_STATUS_FALSE;
         }
