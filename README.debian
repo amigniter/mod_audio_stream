@@ -1,0 +1,9 @@
+[how to install from repository debian bookworm]
+
+wget -O /usr/share/keyrings/mod-audio-stream.gpg https://amigniter.github.io/mod-audio-stream/mod-audio-stream.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/mod-audio-stream.gpg] https://amigniter.github.io/mod-audio-stream bookworm main" > /etc/apt/sources.list.d/mod-audio-stream.list
+
+apt-get update
+
+apt-get install mod-audio-stream
