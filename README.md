@@ -39,14 +39,18 @@ sudo apt-get -y install git \
 ### Channel variables
 The following channel variables can be used to fine tune websocket connection and also configure mod_audio_stream logging:
 
-| Variable               | Description                                         | Default |
-|------------------------|-----------------------------------------------------|---------|
-| STREAM_MESSAGE_DEFLATE | true or 1, disables per message deflate             | off     |
-| STREAM_HEART_BEAT      | number of seconds, interval to send the heart beat  | off     |
-| STREAM_SUPPRESS_LOG    | true or 1, suppresses printing to log               | off     |
-| STREAM_BUFFER_SIZE     | buffer duration in milliseconds, divisible by 20    | 20      |
-| STREAM_EXTRA_HEADERS   | JSON object for additional headers in string format | none    |
-| STREAM_NO_RECONNECT    | true or 1, disables automatic websocket reconnection| off     |
+| Variable                               | Description                                             | Default |
+| -------------------------------------- | ------------------------------------------------------- | ------- |
+| STREAM_MESSAGE_DEFLATE                 | true or 1, disables per message deflate                 | off     |
+| STREAM_HEART_BEAT                      | number of seconds, interval to send the heart beat      | off     |
+| STREAM_SUPPRESS_LOG                    | true or 1, suppresses printing to log                   | off     |
+| STREAM_BUFFER_SIZE                     | buffer duration in milliseconds, divisible by 20        | 20      |
+| STREAM_EXTRA_HEADERS                   | JSON object for additional headers in string format     | none    |
+| STREAM_NO_RECONNECT                    | true or 1, disables automatic websocket reconnection    | off     |
+| STREAM_TLS_CA_FILE                     | CA cert or bundle, or the special values SYSTEM or NONE | SYSTEM  |
+| STREAM_TLS_KEY_FILE                    | optional client key for WSS connections                 | none    |
+| STREAM_TLS_CERT_FILE                   | optional client cert for WSS connections                | none    |
+| STREAM_TLS_DISABLE_HOSTNAME_VALIDATION | true or 1 disable hostname check in WSS connections     | false   |
 
 - Per message deflate compression option is enabled by default. It can lead to a very nice bandwidth savings. To disable it set the channel var to `true|1`.
 - Heart beat, sent every xx seconds when there is no traffic to make sure that load balancers do not kill an idle connection.
@@ -61,6 +65,13 @@ you would set this variable to 100. If ommited, default packet size of 20ms will
       "Header3": "Value3"
   }
 - Websocket automatic reconnection is on by default. To disable it set this channel variable to true or 1.
+- TLS (for WSS) options can be fine tuned with the `STREAM_TLS_*` channel variables:
+  - `STREAM_TLS_CA_FILE` the ca certificate (or certificate bundle) file. By default is `SYSTEM` which means use the system defaults.
+Can be `NONE` which result in no peer verification.
+  - `STREAM_TLS_CERT_FILE` optional client tls certificate file sent to the server.
+  - `STREAM_TLS_KEY_FILE` optional client tls key file for the given certificate.
+  - `STREAM_TLS_DISABLE_HOSTNAME_VALIDATION` if `true`, disables the check of the hostname against the peer server certificate.
+Defaults to `false`, which enforces hostname match with the peer certificate.
 
 ## API
 

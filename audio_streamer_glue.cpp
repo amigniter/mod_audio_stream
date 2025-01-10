@@ -20,10 +20,13 @@ class AudioStreamer {
 public:
 
     AudioStreamer(const char* uuid, const char* wsUri, responseHandler_t callback, int deflate, int heart_beat,
-                    bool globalTrace, bool suppressLog, const char* extra_headers, bool no_reconnect): m_sessionId(uuid), m_notify(callback),
+                    bool globalTrace, bool suppressLog, const char* extra_headers, bool no_reconnect,
+                    const char* tls_cafile, const char* tls_keyfile, const char* tls_certfile,
+                    bool tls_disable_hostname_validation): m_sessionId(uuid), m_notify(callback),
                     m_global_trace(globalTrace), m_suppress_log(suppressLog), m_extra_headers(extra_headers), m_playFile(0){
 
         ix::WebSocketHttpHeaders headers;
+        ix::SocketTLSOptions tlsOptions;
         if (m_extra_headers) {
             cJSON *headers_json = cJSON_Parse(m_extra_headers);
             if (headers_json) {
@@ -39,6 +42,25 @@ public:
         }
 
         webSocket.setUrl(wsUri);
+
+        // Setup eventual TLS options.
+        // tls_cafile may hold the special values
+        // NONE, which disables validation and SYSTEM which uses
+        // the system CAs bundle
+        if (tls_cafile) {
+            tlsOptions.caFile = tls_cafile;
+        }
+
+        if (tls_keyfile) {
+            tlsOptions.keyFile = tls_keyfile;
+        }
+
+        if (tls_certfile) {
+            tlsOptions.certFile = tls_certfile;
+        }
+
+        tlsOptions.disable_hostname_validation = tls_disable_hostname_validation;
+        webSocket.setTLSOptions(tlsOptions);
 
         // Optional heart beat, sent every xx seconds when there is not any traffic
         // to make sure that load balancers do not kill an idle connection.
@@ -326,7 +348,8 @@ namespace {
     switch_status_t stream_data_init(private_t *tech_pvt, switch_core_session_t *session, char *wsUri,
                                      uint32_t sampling, int desiredSampling, int channels, char *metadata, responseHandler_t responseHandler,
                                      int deflate, int heart_beat, bool globalTrace, bool suppressLog, int rtp_packets, const char* extra_headers,
-                                     bool no_reconnect)
+                                     bool no_reconnect, const char *tls_cafile, const char *tls_keyfile,
+                                     const char *tls_certfile, bool tls_disable_hostname_validation)
     {
         int err; //speex
 
@@ -347,7 +370,9 @@ namespace {
         //size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PERIOD * BUFFERED_SEC);
         const size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * rtp_packets);
 
-        auto* as = new AudioStreamer(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat, globalTrace, suppressLog, extra_headers, no_reconnect);
+        auto* as = new AudioStreamer(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat,
+                                        globalTrace, suppressLog, extra_headers, no_reconnect,
+                                        tls_cafile, tls_keyfile, tls_certfile, tls_disable_hostname_validation);
 
         tech_pvt->pAudioStreamer = static_cast<void *>(as);
 
@@ -558,6 +583,10 @@ extern "C" {
         const char* extra_headers;
         int rtp_packets = 1;
         bool no_reconnect = false;
+        const char* tls_cafile = NULL;;
+        const char* tls_keyfile = NULL;;
+        const char* tls_certfile = NULL;;
+        bool tls_disable_hostname_validation = false;
 
         switch_channel_t *channel = switch_core_session_get_channel(session);
 
@@ -575,6 +604,14 @@ extern "C" {
 
         if (switch_channel_var_true(channel, "STREAM_NO_RECONNECT")) {
             no_reconnect = true;
+        }
+
+        tls_cafile = switch_channel_get_variable(channel, "STREAM_TLS_CA_FILE");
+        tls_keyfile = switch_channel_get_variable(channel, "STREAM_TLS_KEY_FILE");
+        tls_certfile = switch_channel_get_variable(channel, "STREAM_TLS_CERT_FILE");
+
+        if (switch_channel_var_true(channel, "STREAM_TLS_DISABLE_HOSTNAME_VALIDATION")) {
+            tls_disable_hostname_validation = true;
         }
 
         const char* heartBeat = switch_channel_get_variable(channel, "STREAM_HEART_BEAT");
@@ -606,7 +643,8 @@ extern "C" {
             return SWITCH_STATUS_FALSE;
         }
         if (SWITCH_STATUS_SUCCESS != stream_data_init(tech_pvt, session, wsUri, samples_per_second, sampling, channels, metadata, responseHandler, deflate, heart_beat,
-                                                        globalTrace, suppressLog, rtp_packets, extra_headers, no_reconnect)) {
+                                                        globalTrace, suppressLog, rtp_packets, extra_headers, no_reconnect,
+                                                        tls_cafile, tls_keyfile, tls_certfile, tls_disable_hostname_validation)) {
             destroy_tech_pvt(tech_pvt);
             return SWITCH_STATUS_FALSE;
         }
