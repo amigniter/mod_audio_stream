@@ -9,10 +9,10 @@ It can be downloaded from **Releases** section and comes as a pre-built Debian 1
 
 ### :fire: **Featuring:**
 
-- :small_blue_diamond: **Continuous Streaming** – Forward audio flows **without interruptions**, ensuring smooth real-time processing.  
-- :small_blue_diamond: **Automatic Playback** – Incoming audio is handled **independently**, allowing seamless speech synthesis integration.  
-- :small_blue_diamond: **Speech-to-Speech Ready** – Perfect for **AI-driven** interactions, assistants, and **real-time communication**.  
-- :small_blue_diamond: **Event-Driven Control** – Playback can be **tracked, paused, or resumed dynamically**, giving you **full control** over the audio. 
+:small_blue_diamond: **Continuous Streaming** – Forward audio flows **without interruptions**, ensuring smooth real-time processing.  
+:small_blue_diamond: **Automatic Playback** – Incoming audio is handled **independently**, allowing seamless speech synthesis integration.  
+:small_blue_diamond: **Speech-to-Speech Ready** – Perfect for **AI-driven** interactions, assistants, and **real-time communication**.  
+:small_blue_diamond: **Event-Driven Control** – Playback can be **tracked, paused, or resumed dynamically**, giving you **full control** over the audio. 
 
 #### About
 
