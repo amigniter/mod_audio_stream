@@ -2,12 +2,14 @@
 
 A FreeSWITCH module that streams L16 audio from a channel to a websocket endpoint. If websocket sends back responses (eg. JSON) it can be effectively used with ASR engines such as IBM Watson etc., or any other purpose you find applicable.
 
-### Update :rocket: **Introducing Bi-Directional Streaming with automatic playback**
+## Update 
+
+#### :rocket: **Introducing Bi-Directional Streaming with automatic playback**
 
 Excited to announce a pre-release (demo version) of `mod-audio-stream v1.0.1`, featuring **true bi-directional streaming**.
 It can be downloaded from **Releases** section and comes as a pre-built Debian 12 package.
 
-### :fire: **Featuring:**
+#### :fire: **Featuring:**
 
 :small_blue_diamond: **Continuous Streaming** – Forward audio flows **without interruptions**, ensuring smooth real-time processing.  
 :small_blue_diamond: **Automatic Playback** – Incoming audio is handled **independently**, allowing seamless speech synthesis integration.  
