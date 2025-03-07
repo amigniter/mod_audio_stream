@@ -244,7 +244,13 @@ public:
 
                 if(jsonAudio && jsonAudio->valuestring != nullptr && !fileType.empty()) {
                     char filePath[256];
-                    std::string rawAudio = base64_decode(jsonAudio->valuestring);
+                    std::string rawAudio;
+                    try {
+                        rawAudio = base64_decode(jsonAudio->valuestring);
+                    } catch (const std::exception& e) {
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - base64 decode error: %s\n",
+                                          m_sessionId.c_str(), e.what());
+                    }
                     switch_snprintf(filePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir,
                                     SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++, fileType.c_str());
                     std::ofstream fstream(filePath, std::ofstream::binary);
