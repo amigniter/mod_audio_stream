@@ -71,12 +71,12 @@ static switch_status_t start_capture(switch_core_session_t *session,
         return SWITCH_STATUS_FALSE;
     }
 
-    read_codec = switch_core_session_get_read_codec(session);
-
     if (switch_channel_pre_answer(channel) != SWITCH_STATUS_SUCCESS) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "mod_audio_stream: channel must have reached pre-answer status before calling start!\n");
         return SWITCH_STATUS_FALSE;
     }
+
+    read_codec = switch_core_session_get_read_codec(session);
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "calling stream_session_init.\n");
     if (SWITCH_STATUS_FALSE == stream_session_init(session, responseHandler, read_codec->implementation->actual_samples_per_second,
