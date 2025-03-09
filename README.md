@@ -42,6 +42,13 @@ sudo make install
 ```
 **TLS** is `OFF` by default. To build with TLS support add `-DUSE_TLS=ON` to cmake line.
 
+#### DEB Package
+To build DEB package after making the module:
+```
+cpack -G DEB
+```
+Debian package will be placed in root directory `_packages` folder.
+
 ## Scripted Build & Installation
 
 ```
