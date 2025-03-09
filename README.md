@@ -33,13 +33,14 @@ If you built FreeSWITCH from source, eq. install dir is /usr/local/freeswitch, a
 ```
 export PKG_CONFIG_PATH=/usr/local/freeswitch/lib/pkgconfig
 ```
-To build the module, from the cloned repository directory:
+To build the module, from the cloned repository:
 ```
 mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
 make
 sudo make install
 ```
+**TLS** is `OFF` by default. To build with TLS support add `-DUSE_TLS=ON` to cmake line.
 
 ## Scripted Build & Installation
 

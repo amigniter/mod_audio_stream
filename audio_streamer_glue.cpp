@@ -12,18 +12,14 @@
 
 #define FRAME_SIZE_8000  320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
 
-namespace {
-    extern switch_bool_t filter_json_string(switch_core_session_t *session, const char* message);
-}
-
 class AudioStreamer {
 public:
 
     AudioStreamer(const char* uuid, const char* wsUri, responseHandler_t callback, int deflate, int heart_beat,
-                    bool globalTrace, bool suppressLog, const char* extra_headers, bool no_reconnect,
+                    bool suppressLog, const char* extra_headers, bool no_reconnect,
                     const char* tls_cafile, const char* tls_keyfile, const char* tls_certfile,
                     bool tls_disable_hostname_validation): m_sessionId(uuid), m_notify(callback),
-                    m_global_trace(globalTrace), m_suppress_log(suppressLog), m_extra_headers(extra_headers), m_playFile(0){
+                    m_suppress_log(suppressLog), m_extra_headers(extra_headers), m_playFile(0){
 
         ix::WebSocketHttpHeaders headers;
         ix::SocketTLSOptions tlsOptions;
@@ -250,6 +246,8 @@ public:
                     } catch (const std::exception& e) {
                         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - base64 decode error: %s\n",
                                           m_sessionId.c_str(), e.what());
+                        cJSON_Delete(jsonAudio); cJSON_Delete(json);
+                        return status;
                     }
                     switch_snprintf(filePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir,
                                     SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++, fileType.c_str());
@@ -313,7 +311,6 @@ private:
     responseHandler_t m_notify;
     ix::WebSocket webSocket;
     bool m_suppress_log;
-    bool m_global_trace;
     const char* m_extra_headers;
     int m_playFile;
     std::unordered_set<std::string> m_Files;
@@ -321,39 +318,10 @@ private:
 
 
 namespace {
-    bool sentAlready = false;
-    std::mutex prevMsgMutex;
-    std::string prevMsg;
-
-    switch_bool_t filter_json_string(switch_core_session_t *session, const char* message) {
-        switch_bool_t send = SWITCH_FALSE;
-        cJSON* json = cJSON_Parse(message);
-        if (!json) {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "parse - failed parsing incoming msg as JSON: %s\n", message);
-            return send;
-        }
-
-        const cJSON *partial = cJSON_GetObjectItem(json, "partial");
-
-        if(cJSON_IsString(partial)) {
-            std::string currentMsg = partial->valuestring;
-            prevMsgMutex.lock();
-            if(currentMsg == prevMsg) {
-                if(!sentAlready) {send = SWITCH_TRUE; sentAlready = true;}
-            } else {
-                prevMsg = currentMsg; send = SWITCH_TRUE;
-            }
-            prevMsgMutex.unlock();
-        } else {
-            send = SWITCH_TRUE;
-        }
-        cJSON_Delete(json);
-        return send;
-    }
 
     switch_status_t stream_data_init(private_t *tech_pvt, switch_core_session_t *session, char *wsUri,
                                      uint32_t sampling, int desiredSampling, int channels, char *metadata, responseHandler_t responseHandler,
-                                     int deflate, int heart_beat, bool globalTrace, bool suppressLog, int rtp_packets, const char* extra_headers,
+                                     int deflate, int heart_beat, bool suppressLog, int rtp_packets, const char* extra_headers,
                                      bool no_reconnect, const char *tls_cafile, const char *tls_keyfile,
                                      const char *tls_certfile, bool tls_disable_hostname_validation)
     {
@@ -377,7 +345,7 @@ namespace {
         const size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * rtp_packets);
 
         auto* as = new AudioStreamer(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat,
-                                        globalTrace, suppressLog, extra_headers, no_reconnect,
+                                        suppressLog, extra_headers, no_reconnect,
                                         tls_cafile, tls_keyfile, tls_certfile, tls_disable_hostname_validation);
 
         tech_pvt->pAudioStreamer = static_cast<void *>(as);
@@ -583,7 +551,6 @@ extern "C" {
                                         void **ppUserData)
     {
         int deflate, heart_beat;
-        bool globalTrace = false;
         bool suppressLog = false;
         const char* buffer_size;
         const char* extra_headers;
@@ -598,10 +565,6 @@ extern "C" {
 
         if (switch_channel_var_true(channel, "STREAM_MESSAGE_DEFLATE")) {
             deflate = 1;
-        }
-
-        if (switch_channel_var_true(channel, "STREAM_GLOBAL_TRACE")) {
-            globalTrace = true;
         }
 
         if (switch_channel_var_true(channel, "STREAM_SUPPRESS_LOG")) {
@@ -649,8 +612,7 @@ extern "C" {
             return SWITCH_STATUS_FALSE;
         }
         if (SWITCH_STATUS_SUCCESS != stream_data_init(tech_pvt, session, wsUri, samples_per_second, sampling, channels, metadata, responseHandler, deflate, heart_beat,
-                                                        globalTrace, suppressLog, rtp_packets, extra_headers, no_reconnect,
-                                                        tls_cafile, tls_keyfile, tls_certfile, tls_disable_hostname_validation)) {
+                                                        suppressLog, rtp_packets, extra_headers, no_reconnect, tls_cafile, tls_keyfile, tls_certfile, tls_disable_hostname_validation)) {
             destroy_tech_pvt(tech_pvt);
             return SWITCH_STATUS_FALSE;
         }

@@ -10,8 +10,10 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_SHARED_LIBRARY_PREFIX "")
 set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -g")
 
-#set(ENV{PKG_CONFIG_PATH} "/usr/local/freeswitch/lib/pkgconfig:/usr/local/ssl/lib/pkgconfig/:$ENV{PKG_CONFIG_PATH}")
-set(ENV{PKG_CONFIG_PATH} "/usr/local/freeswitch/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+option(ENABLE_LOCAL "Enable local compile/debug specific" OFF)
+if(ENABLE_LOCAL)
+    set(ENV{PKG_CONFIG_PATH} "/usr/local/freeswitch/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+endif()
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 find_package(PkgConfig REQUIRED)
@@ -23,7 +25,7 @@ pkg_check_modules(FreeSWITCH REQUIRED IMPORTED_TARGET freeswitch)
 pkg_get_variable(FS_MOD_DIR freeswitch modulesdir)
 message(STATUS "FreeSWITCH modules dir: ${FS_MOD_DIR}")
 
-set(USE_TLS ON CACHE BOOL "Use TLS for secure WebSocket connections" FORCE)
+#set(USE_TLS ON CACHE BOOL "Use TLS for secure WebSocket connections" FORCE)
 set(IXWEBSOCKET_INSTALL OFF CACHE BOOL "Disable ixwebsocket installation" FORCE)
 add_subdirectory(libs/IXWebSocket)
 
