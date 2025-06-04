@@ -1,8 +1,8 @@
 #include <string>
 #include <cstring>
 #include "mod_audio_stream.h"
-#include <ixwebsocket/IXWebSocket.h>
-
+//#include <ixwebsocket/IXWebSocket.h>
+#include "WebSocketClient.h"
 #include <switch_json.h>
 #include <fstream>
 #include <switch_buffer.h>
@@ -21,15 +21,16 @@ public:
                     bool tls_disable_hostname_validation): m_sessionId(uuid), m_notify(callback),
                     m_suppress_log(suppressLog), m_extra_headers(extra_headers), m_playFile(0){
 
-        ix::WebSocketHttpHeaders headers;
-        ix::SocketTLSOptions tlsOptions;
+        WebSocketHeaders hdrs;
+        WebSocketTLSOptions tls;
+
         if (m_extra_headers) {
             cJSON *headers_json = cJSON_Parse(m_extra_headers);
             if (headers_json) {
                 cJSON *iterator = headers_json->child;
                 while (iterator) {
                     if (iterator->type == cJSON_String && iterator->valuestring != nullptr) {
-                        headers[iterator->string] = iterator->valuestring;
+                        hdrs.set(iterator->string, iterator->valuestring);
                     }
                     iterator = iterator->next;
                 }
@@ -37,104 +38,90 @@ public:
             }
         }
 
-        webSocket.setUrl(wsUri);
+        client.setUrl(wsUri);
 
         // Setup eventual TLS options.
         // tls_cafile may hold the special values
         // NONE, which disables validation and SYSTEM which uses
         // the system CAs bundle
         if (tls_cafile) {
-            tlsOptions.caFile = tls_cafile;
+            tls.caFile = tls_cafile;
         }
 
         if (tls_keyfile) {
-            tlsOptions.keyFile = tls_keyfile;
+            tls.keyFile = tls_keyfile;
         }
 
         if (tls_certfile) {
-            tlsOptions.certFile = tls_certfile;
+            tls.certFile = tls_certfile;
         }
 
-        tlsOptions.disable_hostname_validation = tls_disable_hostname_validation;
-        webSocket.setTLSOptions(tlsOptions);
+        tls.disableHostnameValidation = tls_disable_hostname_validation;
+        client.setTLSOptions(tls);
 
         // Optional heart beat, sent every xx seconds when there is not any traffic
         // to make sure that load balancers do not kill an idle connection.
         if(heart_beat)
-            webSocket.setPingInterval(heart_beat);
+            client.setPingInterval(heart_beat);
 
         // Per message deflate connection is enabled by default. You can tweak its parameters or disable it
         if(deflate)
-            webSocket.disablePerMessageDeflate();
+            client.enableCompression(false);
 
         // Set extra headers if any
-        if(!headers.empty())
-            webSocket.setExtraHeaders(headers);
-
-        if(no_reconnect)
-            webSocket.disableAutomaticReconnection();
+        if(!hdrs.empty())
+            client.setHeaders(hdrs);
 
         // Setup a callback to be fired when a message or an event (open, close, error) is received
-        webSocket.setOnMessageCallback([this](const ix::WebSocketMessagePtr& msg){
-            if (msg->type == ix::WebSocketMessageType::Message)
-            {
-                eventCallback(MESSAGE, msg->str.c_str());
+        client.setMessageCallback([this](const std::string& message) {
+            eventCallback(MESSAGE, message.c_str());
+        });
 
-            } else if (msg->type == ix::WebSocketMessageType::Open)
-            {
-                cJSON *root;
-                root = cJSON_CreateObject();
-                cJSON_AddStringToObject(root, "status", "connected");
-                char *json_str = cJSON_PrintUnformatted(root);
+        client.setOpenCallback([this]() {
+            cJSON *root;
+            root = cJSON_CreateObject();
+            cJSON_AddStringToObject(root, "status", "connected");
+            char *json_str = cJSON_PrintUnformatted(root);
+            eventCallback(CONNECT_SUCCESS, json_str);
+            cJSON_Delete(root);
+            switch_safe_free(json_str);
+        });
 
-                eventCallback(CONNECT_SUCCESS, json_str);
+        client.setErrorCallback([this](int code, const std::string &msg) {
+            cJSON *root, *message;
+            root = cJSON_CreateObject();
+            cJSON_AddStringToObject(root, "status", "error");
+            message = cJSON_CreateObject();
+            cJSON_AddNumberToObject(message, "code", code);
+            cJSON_AddStringToObject(message, "error", msg.c_str());
+            cJSON_AddItemToObject(root, "message", message);
 
-                cJSON_Delete(root);
-                switch_safe_free(json_str);
+            char *json_str = cJSON_PrintUnformatted(root);
 
-            } else if (msg->type == ix::WebSocketMessageType::Error)
-            {
-                //A message will be fired when there is an error with the connection. The message type will be ix::WebSocketMessageType::Error.
-                // Multiple fields will be available on the event to describe the error.
-                cJSON *root, *message;
-                root = cJSON_CreateObject();
-                cJSON_AddStringToObject(root, "status", "error");
-                message = cJSON_CreateObject();
-                cJSON_AddNumberToObject(message, "retries", msg->errorInfo.retries);
-                cJSON_AddStringToObject(message, "error", msg->errorInfo.reason.c_str());
-                cJSON_AddNumberToObject(message, "wait_time", msg->errorInfo.wait_time);
-                cJSON_AddNumberToObject(message, "http_status", msg->errorInfo.http_status);
-                cJSON_AddItemToObject(root, "message", message);
+            eventCallback(CONNECT_ERROR, json_str);
 
-                char *json_str = cJSON_PrintUnformatted(root);
+            cJSON_Delete(root);
+            switch_safe_free(json_str);
+        });
 
-                eventCallback(CONNECT_ERROR, json_str);
+        client.setCloseCallback([this](int code, const std::string &reason) {
+            cJSON *root, *message;
+            root = cJSON_CreateObject();
+            cJSON_AddStringToObject(root, "status", "disconnected");
+            message = cJSON_CreateObject();
+            cJSON_AddNumberToObject(message, "code", code);
+            cJSON_AddStringToObject(message, "reason", reason.c_str());
+            cJSON_AddItemToObject(root, "message", message);
+            char *json_str = cJSON_PrintUnformatted(root);
 
-                cJSON_Delete(root);
-                switch_safe_free(json_str);
-            }
-            else if (msg->type == ix::WebSocketMessageType::Close)
-            {
-                // The server can send an explicit code and reason for closing.
-                // This data can be accessed through the closeInfo object.
-                cJSON *root, *message;
-                root = cJSON_CreateObject();
-                cJSON_AddStringToObject(root, "status", "disconnected");
-                message = cJSON_CreateObject();
-                cJSON_AddNumberToObject(message, "code", msg->closeInfo.code);
-                cJSON_AddStringToObject(message, "reason", msg->closeInfo.reason.c_str());
-                cJSON_AddItemToObject(root, "message", message);
-                char *json_str = cJSON_PrintUnformatted(root);
+            eventCallback(CONNECTION_DROPPED, json_str);
 
-                eventCallback(CONNECTION_DROPPED, json_str);
-
-                cJSON_Delete(root);
-                switch_safe_free(json_str);
-            }
+            cJSON_Delete(root);
+            switch_safe_free(json_str);
         });
 
         // Now that our callback is setup, we can start our background thread and receive messages
-        webSocket.start();
+        client.connect();
     }
 
     switch_media_bug_t *get_media_bug(switch_core_session_t *session) {
@@ -281,21 +268,21 @@ public:
 
     void disconnect() {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "disconnecting...\n");
-        webSocket.stop();
+        client.disconnect();
     }
 
     bool isConnected() {
-        return (webSocket.getReadyState() == ix::ReadyState::Open);
+        return client.isConnected();
     }
 
     void writeBinary(uint8_t* buffer, size_t len) {
         if(!this->isConnected()) return;
-        webSocket.sendBinary( ix::IXWebSocketSendData((char *)buffer, len) );
+        client.sendBinary(buffer, len);
     }
 
     void writeText(const char* text) {
         if(!this->isConnected()) return;
-        webSocket.sendUtf8Text(ix::IXWebSocketSendData(text, strlen(text)));
+        client.sendMessage(text, strlen(text));
     }
 
     void deleteFiles() {
@@ -309,7 +296,7 @@ public:
 private:
     std::string m_sessionId;
     responseHandler_t m_notify;
-    ix::WebSocket webSocket;
+    WebSocketClient client;
     bool m_suppress_log;
     const char* m_extra_headers;
     int m_playFile;
@@ -351,35 +338,11 @@ namespace {
         tech_pvt->pAudioStreamer = static_cast<void *>(as);
 
         switch_mutex_init(&tech_pvt->mutex, SWITCH_MUTEX_NESTED, pool);
-
-        if (desiredSampling != sampling) {
-            if (switch_buffer_create(pool, &tech_pvt->sbuffer, buflen) != SWITCH_STATUS_SUCCESS) {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                    "%s: Error creating switch buffer.\n", tech_pvt->sessionId);
-                return SWITCH_STATUS_FALSE;
-            }
-        } else {
-            size_t adjSize = 1; //adjust the buffer size to the closest pow2 size
-            while(adjSize < buflen) {
-                adjSize *= 2;
-            }
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s: initializing buffer(%zu) to adjusted %zu bytes\n",
-                          tech_pvt->sessionId, buflen, adjSize);
-            tech_pvt->data = (uint8_t *) switch_core_alloc(pool, adjSize);
-            if (!tech_pvt->data) {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                                  "%s: Error allocating memory for data buffer.\n", tech_pvt->sessionId);
-                return SWITCH_STATUS_FALSE;
-            }
-            memset(tech_pvt->data, 0, adjSize);
-            tech_pvt->buffer = (RingBuffer *) switch_core_alloc(pool, sizeof(RingBuffer));
-            if (!tech_pvt->buffer) {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                                  "%s: Error allocating memory for ring buffer.\n", tech_pvt->sessionId);
-                return SWITCH_STATUS_FALSE;
-            }
-            memset(tech_pvt->buffer, 0, sizeof(RingBuffer));
-            ringBufferInit(tech_pvt->buffer, tech_pvt->data, adjSize);
+        
+        if (switch_buffer_create(pool, &tech_pvt->sbuffer, buflen) != SWITCH_STATUS_SUCCESS) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                "%s: Error creating switch buffer.\n", tech_pvt->sessionId);
+            return SWITCH_STATUS_FALSE;
         }
 
         if (desiredSampling != sampling) {
@@ -554,7 +517,7 @@ extern "C" {
         bool suppressLog = false;
         const char* buffer_size;
         const char* extra_headers;
-        int rtp_packets = 1;
+        int rtp_packets = 1; //20ms burst
         bool no_reconnect = false;
         const char* tls_cafile = NULL;;
         const char* tls_keyfile = NULL;;
@@ -622,116 +585,101 @@ extern "C" {
         return SWITCH_STATUS_SUCCESS;
     }
 
-    switch_bool_t stream_frame(switch_media_bug_t *bug)
-    {
-        auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
+    switch_bool_t stream_frame(switch_media_bug_t *bug) {
+        auto *tech_pvt = (private_t *)switch_core_media_bug_get_user_data(bug);
         if (!tech_pvt || tech_pvt->audio_paused) return SWITCH_TRUE;
 
-        if (switch_mutex_trylock(tech_pvt->mutex) == SWITCH_STATUS_SUCCESS) {
-
-            if (!tech_pvt->pAudioStreamer) {
-                switch_mutex_unlock(tech_pvt->mutex);
-                return SWITCH_TRUE;
-            }
-
-            auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
-
-            if(!pAudioStreamer->isConnected()) {
-                switch_mutex_unlock(tech_pvt->mutex);
-                return SWITCH_TRUE;
-            }
-
-            if (nullptr == tech_pvt->resampler) {
-                uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
-                switch_frame_t frame = {};
-                frame.data = data;
-                frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
-                size_t available = ringBufferFreeSpace(tech_pvt->buffer);
-                while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
-                    if(frame.datalen) {
-                        if (1 == tech_pvt->rtp_packets) {
-                            pAudioStreamer->writeBinary((uint8_t *) frame.data, frame.datalen);
-                            continue;
-                        }
-
-                        size_t remaining = 0;
-                        if(available >= frame.datalen) {
-                            ringBufferAppendMultiple(tech_pvt->buffer, static_cast<uint8_t *>(frame.data), frame.datalen);
-                        } else {
-                            // The remaining space is not sufficient for the entire chunk
-                            // so write first part up to the available space
-                            ringBufferAppendMultiple(tech_pvt->buffer, static_cast<uint8_t *>(frame.data), available);
-                            remaining = frame.datalen - available;
-                        }
-
-                        if(0 == ringBufferFreeSpace(tech_pvt->buffer)) {
-                            size_t nFrames = ringBufferLen(tech_pvt->buffer);
-                            size_t nBytes = nFrames + remaining;
-                            uint8_t chunkPtr[nBytes];
-                            ringBufferGetMultiple(tech_pvt->buffer, &chunkPtr[0], nBytes);
-
-                            if(remaining > 0) {
-                                memcpy(&chunkPtr[nBytes - remaining], static_cast<uint8_t *>(frame.data) + frame.datalen - remaining, remaining);
-                            }
-
-                            pAudioStreamer->writeBinary(chunkPtr, nBytes);
-
-                            ringBufferClear(tech_pvt->buffer);
-                        }
-
-                    }
-                }
-            } else {
-                uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
-                switch_frame_t frame = {};
-                frame.data = data;
-                frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
-                const size_t available = switch_buffer_freespace(tech_pvt->sbuffer);
-
-                while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
-                    if(frame.datalen) {
-                        spx_uint32_t in_len = frame.samples;
-                        spx_uint32_t out_len = (available / (tech_pvt->channels * sizeof(spx_int16_t)));
-                        spx_int16_t out[available / sizeof(spx_int16_t)];
-
-                        if(tech_pvt->channels == 1) {
-                            speex_resampler_process_int(tech_pvt->resampler,
-                                            0,
-                                            (const spx_int16_t *)frame.data,
-                                            &in_len,
-                                            &out[0],
-                                            &out_len);
-                        } else {
-                            speex_resampler_process_interleaved_int(tech_pvt->resampler,
-                                            (const spx_int16_t *)frame.data,
-                                            &in_len,
-                                            &out[0],
-                                            &out_len);
-                        }
-
-                        if(out_len > 0) {
-                            const size_t bytes_written = out_len * tech_pvt->channels * sizeof(spx_int16_t);
-                            if (tech_pvt->rtp_packets == 1) { //20ms packet
-                                pAudioStreamer->writeBinary((uint8_t *) out, bytes_written);
-                                continue;
-                            }
-                            if (bytes_written <= available) {
-                                switch_buffer_write(tech_pvt->sbuffer, (const uint8_t *)out, bytes_written);
-                            }
-                        }
-
-                        if(switch_buffer_freespace(tech_pvt->sbuffer) == 0) {
-                            const switch_size_t buf_len= switch_buffer_inuse(tech_pvt->sbuffer);
-                            uint8_t buf_ptr[buf_len];
-                            switch_buffer_read(tech_pvt->sbuffer, buf_ptr, buf_len);
-                            switch_buffer_zero(tech_pvt->sbuffer);
-                            pAudioStreamer->writeBinary(buf_ptr, buf_len);
-                        }
-                    }
-                }
-            }
-            switch_mutex_unlock(tech_pvt->mutex);
+        if (switch_mutex_trylock(tech_pvt->mutex) != SWITCH_STATUS_SUCCESS) {
+            return SWITCH_TRUE;
         }
+
+        auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
+
+        if (!pAudioStreamer || !pAudioStreamer->isConnected()) {
+            switch_mutex_unlock(tech_pvt->mutex);
+            return SWITCH_TRUE;
+        }
+
+        auto flush_sbuffer = [&]() {
+            switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
+            if (inuse > 0) {
+                std::vector<uint8_t> tmp(inuse);
+                switch_buffer_read(tech_pvt->sbuffer, tmp.data(), inuse);
+                switch_buffer_zero(tech_pvt->sbuffer);
+                pAudioStreamer->writeBinary(tmp.data(), inuse);
+            }
+        };
+
+        uint8_t data_buf[SWITCH_RECOMMENDED_BUFFER_SIZE];
+        switch_frame_t frame = {0};
+        frame.data = data_buf;
+        frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
+
+        while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
+            if (!tech_pvt->resampler) {
+                if (tech_pvt->rtp_packets == 1) {
+                    pAudioStreamer->writeBinary((uint8_t *)frame.data, frame.datalen);
+                } else {
+                    size_t write_len = frame.datalen;
+                    const uint8_t *write_data = (const uint8_t *)frame.data;
+                    switch_size_t free_space = switch_buffer_freespace(tech_pvt->sbuffer);
+                    if (write_len > free_space) {
+                        flush_sbuffer();
+                    }
+                    switch_buffer_write(tech_pvt->sbuffer, write_data, write_len);
+                    if (switch_buffer_freespace(tech_pvt->sbuffer) == 0) {
+                        flush_sbuffer();
+                    }
+                }
+                continue;
+            }
+
+            size_t available = switch_buffer_freespace(tech_pvt->sbuffer);
+            spx_uint32_t in_len = frame.samples;
+            spx_uint32_t out_len = available / (tech_pvt->channels * sizeof(spx_int16_t));
+            if (out_len == 0) {
+                flush_sbuffer();
+                available = switch_buffer_freespace(tech_pvt->sbuffer);
+                out_len = available / (tech_pvt->channels * sizeof(spx_int16_t));
+            }
+
+            spx_int16_t outbuf[out_len * tech_pvt->channels];
+
+            if (tech_pvt->channels == 1) {
+                speex_resampler_process_int(
+                    tech_pvt->resampler,
+                    0,
+                    (const spx_int16_t *)frame.data,
+                    &in_len,
+                    outbuf,
+                    &out_len
+                );
+            } else {
+                speex_resampler_process_interleaved_int(
+                    tech_pvt->resampler,
+                    (const spx_int16_t *)frame.data,
+                    &in_len,
+                    outbuf,
+                    &out_len
+                );
+            }
+
+            size_t bytes_written = out_len * tech_pvt->channels * sizeof(spx_int16_t);
+            if (bytes_written > 0) {
+                switch_buffer_write(
+                    tech_pvt->sbuffer,
+                    reinterpret_cast<const uint8_t *>(outbuf),
+                    bytes_written
+                );
+                if (switch_buffer_freespace(tech_pvt->sbuffer) == 0) {
+                    flush_sbuffer();
+                }
+            }
+        }
+
+        flush_sbuffer();
+
+        switch_mutex_unlock(tech_pvt->mutex);
         return SWITCH_TRUE;
     }
 

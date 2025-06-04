@@ -3,7 +3,6 @@
 
 #include <switch.h>
 #include <speex/speex_resampler.h>
-#include "buffer/ringbuffer.h"
 
 #define MY_BUG_NAME "audio_stream"
 #define MAX_SESSION_ID (256)
@@ -30,9 +29,7 @@ struct private_data {
     int audio_paused:1;
     int close_requested:1;
     char initialMetadata[8192];
-    RingBuffer *buffer;
     switch_buffer_t *sbuffer;
-    uint8_t *data;
     int rtp_packets;
 };
 

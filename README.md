@@ -6,7 +6,7 @@ A FreeSWITCH module that streams L16 audio from a channel to a websocket endpoin
 
 #### :rocket: **Introducing Bi-Directional Streaming with automatic playback**
 
-A new version `mod-audio-stream v1.0.2` has been published, featuring **raw binary stream** from the websocket.
+A new version `mod-audio-stream v1.0.3` has been published, featuring **raw binary stream** from the websocket.
 It can be downloaded from the **Releases** section (pre-release) and comes as a pre-built Debian 12 package.
 
 - Playback feature allows continuous forward streaming while the playback runs independently.
@@ -19,13 +19,15 @@ It can be downloaded from the **Releases** section (pre-release) and comes as a 
 
 ### About
 
-- The purpose of `mod_audio_stream` was to make a simple, less dependent but yet effective module to stream audio and receive responses from websocket server. It uses [ixwebsocket](https://machinezone.github.io/IXWebSocket/), c++ library for websocket protocol which is compiled as a static library.
+- The purpose of `mod_audio_stream` was to provide a simple, low-dependency yet effective module for streaming audio and receiving responses from a websocket server.
+- Introduced [libwsc](https://github.com/amigniter/libwsc), our in-house, **RFC-6455 compliant** websocket client developed specifically for `mod_audio_stream`.
+  - Replaces [ixwebsocket](https://machinezone.github.io/IXWebSocket/), which served us well for the past few years. `libwsc` is libevent-based, extremely lightweight, and optimized for low-latency audio streaming.
 - This module was inspired by mod_audio_fork.
 
 ## Installation
 
 ### Dependencies
-It requires `libfreeswitch-dev`, `libssl-dev`, `zlib1g-dev` and `libspeexdsp-dev` on Debian/Ubuntu which are regular packages for Freeswitch installation.
+It requires `libfreeswitch-dev`, `libssl-dev`, `zlib1g-dev`, `libevent-dev` and `libspeexdsp-dev` on Debian/Ubuntu which are regular packages for Freeswitch installation.
 ### Building
 After cloning please execute: **git submodule init** and **git submodule update** to initialize the submodule.
 #### Custom path
@@ -69,7 +71,7 @@ The following channel variables can be used to fine tune websocket connection an
 | STREAM_SUPPRESS_LOG                    | true or 1, suppresses printing to log                   | off     |
 | STREAM_BUFFER_SIZE                     | buffer duration in milliseconds, divisible by 20        | 20      |
 | STREAM_EXTRA_HEADERS                   | JSON object for additional headers in string format     | none    |
-| STREAM_NO_RECONNECT                    | true or 1, disables automatic websocket reconnection    | off     |
+| ~~STREAM_NO_RECONNECT~~                    | true or 1, disables automatic websocket reconnection    | off     |
 | STREAM_TLS_CA_FILE                     | CA cert or bundle, or the special values SYSTEM or NONE | SYSTEM  |
 | STREAM_TLS_KEY_FILE                    | optional client key for WSS connections                 | none    |
 | STREAM_TLS_CERT_FILE                   | optional client cert for WSS connections                | none    |
@@ -87,7 +89,8 @@ you would set this variable to 100. If ommited, default packet size of 20ms will
       "Header2": "Value2",
       "Header3": "Value3"
   }
-- Websocket automatic reconnection is on by default. To disable it set this channel variable to true or 1.
+- ~~Websocket automatic reconnection is on by default. To disable it set this channel variable to true or 1.~~
+  - libwsc does not support automatic reconnection.
 - TLS (for WSS) options can be fine tuned with the `STREAM_TLS_*` channel variables:
   - `STREAM_TLS_CA_FILE` the ca certificate (or certificate bundle) file. By default is `SYSTEM` which means use the system defaults.
 Can be `NONE` which result in no peer verification.
@@ -187,14 +190,28 @@ There is an error with the connection. Multiple fields will be available on the 
 {
 	"status": "error",
 	"message": {
-		"retries": 1,
-		"error": "Expecting status 101 (Switching Protocol), got 403 status connecting to wss://localhost, HTTP Status line: HTTP/1.1 403 Forbidden\r\n",
-		"wait_time": 100,
-		"http_status": 403
+		"code": 1,
+		"error": "String explaining the error"
 	}
 }
 ```
-- retries: `<int>`, error: `<string>`, wait_time: `<int>`, http_status: `<int>`
+- code: `<int>`
+- error: `<string>`
+
+#### Possible `code` values
+
+| Code | Enum Name             | Meaning                                              |
+|:----:|:----------------------|:-----------------------------------------------------|
+| 1    | `IO`                  | I/O error when reading/writing sockets               |
+| 2    | `INVALID_HEADER`      | Server sent a malformed WebSocket header             |
+| 3    | `SERVER_MASKED`       | Server frames were masked (not allowed by spec)      |
+| 4    | `NOT_SUPPORTED`       | Requested feature (e.g. extension) not supported     |
+| 5    | `PING_TIMEOUT`        | No PONG received within timeout                      |
+| 6    | `CONNECT_FAILED`      | TCP connection or DNS lookup failed                  |
+| 7    | `TLS_INIT_FAILED`     | Couldn't initialize SSL/TLS context                  |
+| 8    | `SSL_HANDSHAKE_FAILED`| SSL/TLS handshake with server failed                 |
+| 9    | `SSL_ERROR`           | Generic OpenSSL error (certificate, cipher, etc.)    |
+
 
 ### play
 **Name**: mod_audio_stream::play
