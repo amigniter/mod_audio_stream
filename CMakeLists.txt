@@ -21,8 +21,11 @@ find_package(SpeexDSP REQUIRED)
 
 pkg_check_modules(FreeSWITCH REQUIRED IMPORTED_TARGET freeswitch)
 pkg_get_variable(FS_MOD_DIR freeswitch modulesdir)
+pkg_get_variable(FS_INCLUDE_DIR freeswitch includedir)
 message(STATUS "FreeSWITCH modules dir: ${FS_MOD_DIR}")
+message(STATUS "FreeSWITCH includes dir: ${FS_INCLUDE_DIR}")
 
+set(LIBWSC_ENABLE_INSTALL OFF CACHE BOOL "Disable libwsc install from subproject" FORCE)
 add_subdirectory(libs/libwsc)
 
 add_library(mod_audio_stream SHARED 
@@ -46,6 +49,10 @@ if(CMAKE_BUILD_TYPE MATCHES "Release")
         PROPERTIES 
         LINK_FLAGS_RELEASE "-s")
 endif()
+
+install(TARGETS libwsc
+    ARCHIVE DESTINATION ${FS_MOD_DIR}
+)
 
 set(CPACK_COMPONENTS_ALL ${PROJECT_NAME} changelog.gz copyright)
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, libspeexdsp1, openssl, zlib1g, libfreeswitch1")
@@ -73,13 +80,19 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/copyright"
         COMPONENT copyright
 )
 
+install(DIRECTORY libs/libwsc/libwsc/
+        DESTINATION ${FS_INCLUDE_DIR}
+        FILES_MATCHING PATTERN "*.h"
+)
+
 install(TARGETS ${PROJECT_NAME}
         COMPONENT ${PROJECT_NAME}
-        DESTINATION ${FS_MOD_DIR})
+        DESTINATION ${FS_MOD_DIR}
+)
 
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/changelog.gz"
-	DESTINATION "${CMAKE_INSTALL_DOCDIR}"
-	COMPONENT changelog.gz
+        DESTINATION "${CMAKE_INSTALL_DOCDIR}"
+        COMPONENT changelog.gz
 )
 
 message(STATUS "Components to pack: ${CPACK_COMPONENTS_ALL}")
