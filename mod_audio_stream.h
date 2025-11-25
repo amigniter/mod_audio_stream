@@ -5,6 +5,7 @@
 #include <speex/speex_resampler.h>
 
 #define MY_BUG_NAME "audio_stream"
+#define MAX_BUG_LEN (64)
 #define MAX_SESSION_ID (256)
 #define MAX_WS_URI (4096)
 #define MAX_METADATA_LEN (8192)
@@ -31,6 +32,7 @@ struct private_data {
     char initialMetadata[8192];
     switch_buffer_t *sbuffer;
     int rtp_packets;
+    char bugname[MAX_BUG_LEN+1];
 };
 
 typedef struct private_data private_t;

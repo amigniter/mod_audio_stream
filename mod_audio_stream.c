@@ -34,7 +34,7 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Got SWITCH_ABC_TYPE_CLOSE.\n");
                 // Check if this is a normal channel closure or a requested closure
                 channel_closing = tech_pvt->close_requested ? 0 : 1;
-                stream_session_cleanup(session, NULL, channel_closing);
+                stream_session_cleanup(session,tech_pvt->bugname, NULL, channel_closing);
             }
             break;
 
@@ -57,7 +57,9 @@ static switch_status_t start_capture(switch_core_session_t *session,
                                      switch_media_bug_flag_t flags,
                                      char* wsUri,
                                      int sampling,
-                                     char* metadata)
+                                     char* bugname,
+                                     char* metadata
+                                     )
 {
     switch_channel_t *channel = switch_core_session_get_channel(session);
     switch_media_bug_t *bug;
@@ -66,8 +68,9 @@ static switch_status_t start_capture(switch_core_session_t *session,
 
     void *pUserData = NULL;
     int channels = (flags & SMBF_STEREO) ? 2 : 1;
+    uint32_t samples_per_second;
 
-    if (switch_channel_get_private(channel, MY_BUG_NAME)) {
+    if (switch_channel_get_private(channel, bugname)) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "mod_audio_stream: bug already attached!\n");
         return SWITCH_STATUS_FALSE;
     }
@@ -78,25 +81,35 @@ static switch_status_t start_capture(switch_core_session_t *session,
     }
 
     read_codec = switch_core_session_get_read_codec(session);
-
+    if (read_codec == NULL) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "No read codec assigned, set default session rate to 8000 samples\n");
+        samples_per_second = 8000;
+    } else {
+        if (read_codec->implementation == NULL) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "No read codec implementation assigned, set default session rate to 8000 samples\n");
+            samples_per_second = 8000;
+        } else {
+            samples_per_second = read_codec->implementation->actual_samples_per_second;
+        }
+    }
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "calling stream_session_init.\n");
-    if (SWITCH_STATUS_FALSE == stream_session_init(session, responseHandler, read_codec->implementation->actual_samples_per_second,
-                                                 wsUri, sampling, channels, metadata, &pUserData)) {
+    if (SWITCH_STATUS_FALSE == stream_session_init(session, responseHandler, samples_per_second,
+                                                 wsUri, sampling, channels, bugname, metadata, &pUserData)) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing mod_audio_stream session.\n");
         return SWITCH_STATUS_FALSE;
     }
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "adding bug.\n");
-    if ((status = switch_core_media_bug_add(session, MY_BUG_NAME, NULL, capture_callback, pUserData, 0, flags, &bug)) != SWITCH_STATUS_SUCCESS) {
+    if ((status = switch_core_media_bug_add(session, bugname, NULL, capture_callback, pUserData, 0, flags, &bug)) != SWITCH_STATUS_SUCCESS) {
         return status;
     }
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "setting bug private data.\n");
-    switch_channel_set_private(channel, MY_BUG_NAME, bug);
+    switch_channel_set_private(channel, bugname, bug);
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "exiting start_capture.\n");
     return SWITCH_STATUS_SUCCESS;
 }
 
-static switch_status_t do_stop(switch_core_session_t *session, char* text)
+static switch_status_t do_stop(switch_core_session_t *session, char* bugname, char* text)
 {
     switch_status_t status = SWITCH_STATUS_SUCCESS;
 
@@ -106,29 +119,28 @@ static switch_status_t do_stop(switch_core_session_t *session, char* text)
     else {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "mod_audio_stream: stop\n");
     }
-    status = stream_session_cleanup(session, text, 0);
+    status = stream_session_cleanup(session, bugname, text, 0);
 
     return status;
 }
 
-static switch_status_t do_pauseresume(switch_core_session_t *session, int pause)
+static switch_status_t do_pauseresume(switch_core_session_t *session, char* bugname, int pause)
 {
     switch_status_t status = SWITCH_STATUS_SUCCESS;
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "mod_audio_stream: %s\n", pause ? "pause" : "resume");
-    status = stream_session_pauseresume(session, pause);
+    status = stream_session_pauseresume(session, bugname, pause);
 
     return status;
 }
 
-static switch_status_t send_text(switch_core_session_t *session, char* text) {
+static switch_status_t send_text(switch_core_session_t *session,  char *bugname, char* text) {
     switch_status_t status = SWITCH_STATUS_FALSE;
     switch_channel_t *channel = switch_core_session_get_channel(session);
-    switch_media_bug_t *bug = switch_channel_get_private(channel, MY_BUG_NAME);
-
+    switch_media_bug_t *bug = switch_channel_get_private(channel, bugname);
     if (bug) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "mod_audio_stream: sending text: %s.\n", text);
-        status = stream_session_send_text(session, text);
+        status = stream_session_send_text(session, bugname, text);
     }
     else {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "mod_audio_stream: no bug, failed sending text: %s.\n", text);
@@ -136,12 +148,13 @@ static switch_status_t send_text(switch_core_session_t *session, char* text) {
     return status;
 }
 
-#define STREAM_API_SYNTAX "<uuid> [start | stop | send_text | pause | resume | graceful-shutdown ] [wss-url | path] [mono | mixed | stereo] [8000 | 16000] [metadata]"
+#define STREAM_API_SYNTAX "<uuid> [start | stop | send_text | pause | resume | graceful-shutdown ] [wss-url | path] [mono | mixed | stereo] [8000 | 16000] [bugname] [metadata]"
 SWITCH_STANDARD_API(stream_function)
 {
-    char *mycmd = NULL, *argv[6] = { 0 };
+    char *mycmd = NULL, *argv[7] = { 0 };
     int argc = 0;
-
+    char *bugname = MY_BUG_NAME;
+    char *metadata = NULL;
     switch_status_t status = SWITCH_STATUS_FALSE;
 
     if (!zstr(cmd) && (mycmd = strdup(cmd))) {
@@ -158,17 +171,20 @@ SWITCH_STANDARD_API(stream_function)
         switch_core_session_t *lsession = NULL;
         if ((lsession = switch_core_session_locate(argv[0]))) {
             if (!strcasecmp(argv[1], "stop")) {
-                if(argc > 2 && (is_valid_utf8(argv[2]) != SWITCH_STATUS_SUCCESS)) {
+                if ( argc > 2 ) {
+                    bugname = argv[2];
+                }
+                if(argc > 3 && (is_valid_utf8(argv[3]) != SWITCH_STATUS_SUCCESS)) {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                                       "%s contains invalid utf8 characters\n", argv[2]);
                     switch_core_session_rwunlock(lsession);
                     goto done;
                 }
-                status = do_stop(lsession, argc > 2 ? argv[2] : NULL);
+                status = do_stop(lsession, bugname, argc > 3 ? argv[3] : NULL);
             } else if (!strcasecmp(argv[1], "pause")) {
-                status = do_pauseresume(lsession, 1);
+                status = do_pauseresume(lsession, bugname, 1);
             } else if (!strcasecmp(argv[1], "resume")) {
-                status = do_pauseresume(lsession, 0);
+                status = do_pauseresume(lsession, bugname, 0);
             } else if (!strcasecmp(argv[1], "send_text")) {
                 if (argc < 3) {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
@@ -176,13 +192,15 @@ SWITCH_STANDARD_API(stream_function)
                     switch_core_session_rwunlock(lsession);
                     goto done;
                 }
+                if  (argc > 3) bugname = argv[3];
                 if(is_valid_utf8(argv[2]) != SWITCH_STATUS_SUCCESS) {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                                       "%s contains invalid utf8 characters\n", argv[2]);
                     switch_core_session_rwunlock(lsession);
                     goto done;
                 }
-                status = send_text(lsession, argv[2]);
+
+                status = send_text(lsession, argv[2],bugname);
             } else if (!strcasecmp(argv[1], "start")) {
                 //switch_channel_t *channel = switch_core_session_get_channel(lsession);
                 char wsUri[MAX_WS_URI];
@@ -215,6 +233,9 @@ SWITCH_STANDARD_API(stream_function)
                         sampling = atoi(argv[4]);
                     }
                 }
+                if (argc > 5) bugname = argv[5];
+                if (argc > 6) metadata = argv[6];
+
                 if (!validate_ws_uri(argv[2], &wsUri[0])) {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                                       "invalid websocket uri: %s\n", argv[2]);
@@ -222,7 +243,7 @@ SWITCH_STANDARD_API(stream_function)
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                                       "invalid sample rate: %s\n", argv[4]);
                 } else {
-                    status = start_capture(lsession, flags, wsUri, sampling, metadata);
+                    status = start_capture(lsession, flags, wsUri, sampling, bugname, metadata);
                 }
             } else {
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
