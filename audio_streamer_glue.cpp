@@ -15,15 +15,14 @@
 class AudioStreamer {
 public:
 
-    AudioStreamer(const char* uuid, const char* wsUri, responseHandler_t callback, int deflate, int heart_beat,
+    AudioStreamer(const char* uuid, char* bugname, const char* wsUri, responseHandler_t callback, int deflate, int heart_beat,
                     bool suppressLog, const char* extra_headers, bool no_reconnect,
                     const char* tls_cafile, const char* tls_keyfile, const char* tls_certfile,
                     bool tls_disable_hostname_validation): m_sessionId(uuid), m_notify(callback),
                     m_suppress_log(suppressLog), m_extra_headers(extra_headers), m_playFile(0){
 
-        WebSocketHeaders hdrs;
-        WebSocketTLSOptions tls;
-
+        ix::WebSocketHttpHeaders headers;
+        ix::SocketTLSOptions tlsOptions;
         if (m_extra_headers) {
             cJSON *headers_json = cJSON_Parse(m_extra_headers);
             if (headers_json) {
@@ -73,16 +72,16 @@ public:
             client.setHeaders(hdrs);
 
         // Setup a callback to be fired when a message or an event (open, close, error) is received
-        client.setMessageCallback([this](const std::string& message) {
-            eventCallback(MESSAGE, message.c_str());
+        client.setMessageCallback([this,bugname](const std::string& message) {
+            eventCallback(MESSAGE, message.c_str(), bugname);
         });
 
-        client.setOpenCallback([this]() {
+        client.setOpenCallback([this, bugname]() {
             cJSON *root;
             root = cJSON_CreateObject();
             cJSON_AddStringToObject(root, "status", "connected");
             char *json_str = cJSON_PrintUnformatted(root);
-            eventCallback(CONNECT_SUCCESS, json_str);
+            eventCallback(CONNECT_SUCCESS, json_str, bugname);
             cJSON_Delete(root);
             switch_safe_free(json_str);
         });
@@ -98,7 +97,7 @@ public:
 
             char *json_str = cJSON_PrintUnformatted(root);
 
-            eventCallback(CONNECT_ERROR, json_str);
+            eventCallback(CONNECT_ERROR, json_str, bugname);
 
             cJSON_Delete(root);
             switch_safe_free(json_str);
@@ -114,7 +113,7 @@ public:
             cJSON_AddItemToObject(root, "message", message);
             char *json_str = cJSON_PrintUnformatted(root);
 
-            eventCallback(CONNECTION_DROPPED, json_str);
+            eventCallback(CONNECTION_DROPPED, json_strm bugname);
 
             cJSON_Delete(root);
             switch_safe_free(json_str);
@@ -124,17 +123,17 @@ public:
         client.connect();
     }
 
-    switch_media_bug_t *get_media_bug(switch_core_session_t *session) {
+    switch_media_bug_t *get_media_bug(switch_core_session_t *session, char* bugname) {
         switch_channel_t *channel = switch_core_session_get_channel(session);
         if(!channel) {
             return nullptr;
         }
-        auto *bug = (switch_media_bug_t *) switch_channel_get_private(channel, MY_BUG_NAME);
+        auto *bug = (switch_media_bug_t *) switch_channel_get_private(channel, bugname);
         return bug;
     }
 
-    inline void media_bug_close(switch_core_session_t *session) {
-        auto *bug = get_media_bug(session);
+    inline void media_bug_close(switch_core_session_t *session, char *bugname) {
+        auto *bug = get_media_bug(session, bugname);
         if(bug) {
             auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
             tech_pvt->close_requested = 1;
@@ -142,8 +141,8 @@ public:
         }
     }
 
-    inline void send_initial_metadata(switch_core_session_t *session) {
-        auto *bug = get_media_bug(session);
+    inline void send_initial_metadata(switch_core_session_t *session, char *bugname) {
+        auto *bug = get_media_bug(session, bugname);
         if(bug) {
             auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
             if(tech_pvt && strlen(tech_pvt->initialMetadata) > 0) {
@@ -154,12 +153,12 @@ public:
         }
     }
 
-    void eventCallback(notifyEvent_t event, const char* message) {
+    void eventCallback(notifyEvent_t event, const char* message, char* bugname) {
         switch_core_session_t* psession = switch_core_session_locate(m_sessionId.c_str());
         if(psession) {
             switch (event) {
                 case CONNECT_SUCCESS:
-                    send_initial_metadata(psession);
+                    send_initial_metadata(psession, bugname);
                     m_notify(psession, EVENT_CONNECT, message);
                     break;
                 case CONNECTION_DROPPED:
@@ -170,7 +169,7 @@ public:
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "connection error\n");
                     m_notify(psession, EVENT_ERROR, message);
 
-                    media_bug_close(psession);
+                    media_bug_close(psession, bugname);
 
                     break;
                 case MESSAGE:
@@ -306,7 +305,7 @@ private:
 
 namespace {
 
-    switch_status_t stream_data_init(private_t *tech_pvt, switch_core_session_t *session, char *wsUri,
+    switch_status_t stream_data_init(private_t *tech_pvt, switch_core_session_t *session, char* bugname, char *wsUri,
                                      uint32_t sampling, int desiredSampling, int channels, char *metadata, responseHandler_t responseHandler,
                                      int deflate, int heart_beat, bool suppressLog, int rtp_packets, const char* extra_headers,
                                      bool no_reconnect, const char *tls_cafile, const char *tls_keyfile,
@@ -320,6 +319,7 @@ namespace {
 
         strncpy(tech_pvt->sessionId, switch_core_session_get_uuid(session), MAX_SESSION_ID);
         strncpy(tech_pvt->ws_uri, wsUri, MAX_WS_URI);
+        strncpy(tech_pvt->bugname, bugname, MAX_BUG_LEN);
         tech_pvt->sampling = desiredSampling;
         tech_pvt->responseHandler = responseHandler;
         tech_pvt->rtp_packets = rtp_packets;
@@ -331,14 +331,14 @@ namespace {
         //size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PERIOD * BUFFERED_SEC);
         const size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * rtp_packets);
 
-        auto* as = new AudioStreamer(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat,
+        auto* as = new AudioStreamer(tech_pvt->sessionId, bugname, wsUri, responseHandler, deflate, heart_beat,
                                         suppressLog, extra_headers, no_reconnect,
                                         tls_cafile, tls_keyfile, tls_certfile, tls_disable_hostname_validation);
 
         tech_pvt->pAudioStreamer = static_cast<void *>(as);
 
         switch_mutex_init(&tech_pvt->mutex, SWITCH_MUTEX_NESTED, pool);
-        
+
         if (switch_buffer_create(pool, &tech_pvt->sbuffer, buflen) != SWITCH_STATUS_SUCCESS) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                 "%s: Error creating switch buffer.\n", tech_pvt->sessionId);
@@ -472,9 +472,9 @@ extern "C" {
         return SWITCH_STATUS_SUCCESS;
     }
 
-    switch_status_t stream_session_send_text(switch_core_session_t *session, char* text) {
+    switch_status_t stream_session_send_text(switch_core_session_t *session, char* bugname, char* text) {
         switch_channel_t *channel = switch_core_session_get_channel(session);
-        auto *bug = (switch_media_bug_t*) switch_channel_get_private(channel, MY_BUG_NAME);
+        auto *bug = (switch_media_bug_t*) switch_channel_get_private(channel, bugname);
         if (!bug) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "stream_session_send_text failed because no bug\n");
             return SWITCH_STATUS_FALSE;
@@ -488,9 +488,9 @@ extern "C" {
         return SWITCH_STATUS_SUCCESS;
     }
 
-    switch_status_t stream_session_pauseresume(switch_core_session_t *session, int pause) {
+    switch_status_t stream_session_pauseresume(switch_core_session_t *session, char* bugname, int pause) {
         switch_channel_t *channel = switch_core_session_get_channel(session);
-        auto *bug = (switch_media_bug_t*) switch_channel_get_private(channel, MY_BUG_NAME);
+        auto *bug = (switch_media_bug_t*) switch_channel_get_private(channel, bugname);
         if (!bug) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "stream_session_pauseresume failed because no bug\n");
             return SWITCH_STATUS_FALSE;
@@ -510,6 +510,7 @@ extern "C" {
                                         char *wsUri,
                                         int sampling,
                                         int channels,
+                                        char *bugname,
                                         char* metadata,
                                         void **ppUserData)
     {
@@ -574,7 +575,7 @@ extern "C" {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "error allocating memory!\n");
             return SWITCH_STATUS_FALSE;
         }
-        if (SWITCH_STATUS_SUCCESS != stream_data_init(tech_pvt, session, wsUri, samples_per_second, sampling, channels, metadata, responseHandler, deflate, heart_beat,
+        if (SWITCH_STATUS_SUCCESS != stream_data_init(tech_pvt, session, bugname, wsUri, samples_per_second, sampling, channels, metadata, responseHandler, deflate, heart_beat,
                                                         suppressLog, rtp_packets, extra_headers, no_reconnect, tls_cafile, tls_keyfile, tls_certfile, tls_disable_hostname_validation)) {
             destroy_tech_pvt(tech_pvt);
             return SWITCH_STATUS_FALSE;
@@ -614,7 +615,7 @@ extern "C" {
             }
 
             if (nullptr == tech_pvt->resampler) {
-                
+
                 uint8_t data_buf[SWITCH_RECOMMENDED_BUFFER_SIZE];
                 switch_frame_t frame = {0};
                 frame.data = data_buf;
@@ -641,7 +642,7 @@ extern "C" {
                         }
                     }
                 }
-                
+
             } else {
 
                 uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
@@ -694,16 +695,16 @@ extern "C" {
                     }
                 }
             }
-            
+
             switch_mutex_unlock(tech_pvt->mutex);
         }
 
         return SWITCH_TRUE;
     }
 
-    switch_status_t stream_session_cleanup(switch_core_session_t *session, char* text, int channelIsClosing) {
+    switch_status_t stream_session_cleanup(switch_core_session_t *session, char* bugname, char* text, int channelIsClosing) {
         switch_channel_t *channel = switch_core_session_get_channel(session);
-        auto *bug = (switch_media_bug_t*) switch_channel_get_private(channel, MY_BUG_NAME);
+        auto *bug = (switch_media_bug_t*) switch_channel_get_private(channel, bugname);
         if(bug)
         {
             auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
@@ -713,7 +714,7 @@ extern "C" {
             switch_mutex_lock(tech_pvt->mutex);
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) stream_session_cleanup\n", sessionId);
 
-            switch_channel_set_private(channel, MY_BUG_NAME, nullptr);
+            switch_channel_set_private(channel, bugname, nullptr);
             if (!channelIsClosing) {
                 switch_core_media_bug_remove(session, &bug);
             }
