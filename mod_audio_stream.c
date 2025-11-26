@@ -154,7 +154,6 @@ SWITCH_STANDARD_API(stream_function)
     char *mycmd = NULL, *argv[7] = { 0 };
     int argc = 0;
     char *bugname = MY_BUG_NAME;
-    char *metadata = NULL;
     switch_status_t status = SWITCH_STATUS_FALSE;
 
     if (!zstr(cmd) && (mycmd = strdup(cmd))) {
