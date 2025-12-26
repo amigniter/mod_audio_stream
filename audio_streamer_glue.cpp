@@ -74,6 +74,7 @@ public:
 
         // Setup a callback to be fired when a message or an event (open, close, error) is received
         client.setMessageCallback([this](const std::string& message) {
+            if (this->isCleanedUp()) return;
             eventCallback(MESSAGE, message.c_str());
         });
 
@@ -293,6 +294,16 @@ public:
         }
     }
 
+    void markCleanedUp() {
+        m_cleanedUp.store(true, std::memory_order_release);
+        // clear callbacks to prevent dangling calls
+        client.setMessageCallback({});
+    }
+
+    bool isCleanedUp() const {
+        return m_cleanedUp.load(std::memory_order_acquire);
+    }
+
 private:
     std::string m_sessionId;
     responseHandler_t m_notify;
@@ -301,6 +312,7 @@ private:
     const char* m_extra_headers;
     int m_playFile;
     std::unordered_set<std::string> m_Files;
+    std::atomic_bool m_cleanedUp {false};
 };
 
 
@@ -372,22 +384,17 @@ namespace {
             switch_mutex_destroy(tech_pvt->mutex);
             tech_pvt->mutex = nullptr;
         }
-        if (tech_pvt->pAudioStreamer) {
+        /*if (tech_pvt->pAudioStreamer) {
             auto* as = (AudioStreamer *) tech_pvt->pAudioStreamer;
             delete as;
             tech_pvt->pAudioStreamer = nullptr;
-        }
+        }*/
     }
 
-    void finish(private_t* tech_pvt) {
-        std::shared_ptr<AudioStreamer> aStreamer;
-        aStreamer.reset((AudioStreamer *)tech_pvt->pAudioStreamer);
-        tech_pvt->pAudioStreamer = nullptr;
-
-        std::thread t([aStreamer]{
-            aStreamer->disconnect();
-        });
-        t.detach();
+    void finish(AudioStreamer* audioStreamer) {
+        audioStreamer->markCleanedUp();
+        audioStreamer->disconnect();
+        delete audioStreamer;
     }
 
 }
@@ -709,8 +716,16 @@ extern "C" {
             auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
             char sessionId[MAX_SESSION_ID];
             strcpy(sessionId, tech_pvt->sessionId);
+            AudioStreamer* audioStreamer = nullptr;
 
             switch_mutex_lock(tech_pvt->mutex);
+
+            if (tech_pvt->cleanup_started) {
+                switch_mutex_unlock(tech_pvt->mutex);
+                return SWITCH_STATUS_SUCCESS;
+            }
+            tech_pvt->cleanup_started = 1;
+
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) stream_session_cleanup\n", sessionId);
 
             switch_channel_set_private(channel, MY_BUG_NAME, nullptr);
@@ -718,11 +733,16 @@ extern "C" {
                 switch_core_media_bug_remove(session, &bug);
             }
 
-            auto* audioStreamer = (AudioStreamer *) tech_pvt->pAudioStreamer;
+            //auto* audioStreamer = (AudioStreamer *) tech_pvt->pAudioStreamer;
+            audioStreamer = (AudioStreamer*) tech_pvt->pAudioStreamer;
+            tech_pvt->pAudioStreamer = nullptr;
+
+            switch_mutex_unlock(tech_pvt->mutex);
+
             if(audioStreamer) {
                 audioStreamer->deleteFiles();
                 if (text) audioStreamer->writeText(text);
-                finish(tech_pvt);
+                finish(audioStreamer);
             }
 
             destroy_tech_pvt(tech_pvt);
