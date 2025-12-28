@@ -1,13 +1,14 @@
 #include <string>
 #include <cstring>
 #include "mod_audio_stream.h"
-//#include <ixwebsocket/IXWebSocket.h>
 #include "WebSocketClient.h"
 #include <switch_json.h>
 #include <fstream>
 #include <switch_buffer.h>
 #include <unordered_map>
 #include <unordered_set>
+#include <atomic>
+#include <vector>
 #include "base64.h"
 
 #define FRAME_SIZE_8000  320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
@@ -312,7 +313,7 @@ private:
     const char* m_extra_headers;
     int m_playFile;
     std::unordered_set<std::string> m_Files;
-    std::atomic_bool m_cleanedUp {false};
+    std::atomic<bool> m_cleanedUp{false};
 };
 
 
