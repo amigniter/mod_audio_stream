@@ -80,6 +80,8 @@ public:
         });
 
         client.setOpenCallback([this]() {
+            // FIX: Add guard to prevent use-after-free
+            if (m_cleanedUp.load(std::memory_order_acquire)) return;
             cJSON *root;
             root = cJSON_CreateObject();
             cJSON_AddStringToObject(root, "status", "connected");
@@ -90,6 +92,8 @@ public:
         });
 
         client.setErrorCallback([this](int code, const std::string &msg) {
+            // FIX: Add guard to prevent use-after-free
+            if (m_cleanedUp.load(std::memory_order_acquire)) return;
             cJSON *root, *message;
             root = cJSON_CreateObject();
             cJSON_AddStringToObject(root, "status", "error");
@@ -107,6 +111,8 @@ public:
         });
 
         client.setCloseCallback([this](int code, const std::string &reason) {
+            // FIX: Add guard to prevent use-after-free
+            if (m_cleanedUp.load(std::memory_order_acquire)) return;
             cJSON *root, *message;
             root = cJSON_CreateObject();
             cJSON_AddStringToObject(root, "status", "disconnected");
@@ -297,8 +303,11 @@ public:
 
     void markCleanedUp() {
         m_cleanedUp.store(true, std::memory_order_release);
-        // clear callbacks to prevent dangling calls
+        // FIX: Clear ALL callbacks to prevent dangling calls (was only clearing message callback)
         client.setMessageCallback({});
+        client.setOpenCallback({});
+        client.setErrorCallback({});
+        client.setCloseCallback({});
     }
 
     bool isCleanedUp() const {
@@ -756,4 +765,3 @@ extern "C" {
         return SWITCH_STATUS_FALSE;
     }
 }
-
