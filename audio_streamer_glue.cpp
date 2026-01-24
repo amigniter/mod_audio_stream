@@ -9,18 +9,81 @@
 #include <unordered_set>
 #include <atomic>
 #include <vector>
+#include <memory>
 #include "base64.h"
 
 #define FRAME_SIZE_8000  320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
 
 class AudioStreamer {
 public:
+    // Factory
+    static std::shared_ptr<AudioStreamer> create(
+        const char* uuid, const char* wsUri, responseHandler_t callback, int deflate, int heart_beat,
+        bool suppressLog, const char* extra_headers, const char* tls_cafile, const char* tls_keyfile, 
+        const char* tls_certfile, bool tls_disable_hostname_validation) {
 
-    AudioStreamer(const char* uuid, const char* wsUri, responseHandler_t callback, int deflate, int heart_beat,
-                    bool suppressLog, const char* extra_headers, bool no_reconnect,
-                    const char* tls_cafile, const char* tls_keyfile, const char* tls_certfile,
-                    bool tls_disable_hostname_validation): m_sessionId(uuid), m_notify(callback),
-                    m_suppress_log(suppressLog), m_extra_headers(extra_headers), m_playFile(0){
+        std::shared_ptr<AudioStreamer> sp(new AudioStreamer(
+            uuid, wsUri, callback, deflate, heart_beat,
+            suppressLog, extra_headers, tls_cafile, tls_keyfile, 
+            tls_certfile, tls_disable_hostname_validation
+        ));
+
+        sp->bindCallbacks(std::weak_ptr<AudioStreamer>(sp));
+
+        sp->client.connect();
+
+        return sp;
+    }
+
+    ~AudioStreamer()= default;
+
+    void disconnect() {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "disconnecting...\n");
+        client.disconnect();
+    }
+
+    bool isConnected() {
+        return client.isConnected();
+    }
+
+    void writeBinary(uint8_t* buffer, size_t len) {
+        if(!this->isConnected()) return;
+        client.sendBinary(buffer, len);
+    }
+
+    void writeText(const char* text) {
+        if(!this->isConnected()) return;
+        client.sendMessage(text, strlen(text));
+    }
+
+    void deleteFiles() {
+        if(m_playFile >0) {
+            for (const auto &fileName: m_Files) {
+                remove(fileName.c_str());
+            }
+        }
+    }
+
+    void markCleanedUp() {
+        m_cleanedUp.store(true, std::memory_order_release);
+        client.setMessageCallback({});
+        client.setOpenCallback({});
+        client.setErrorCallback({});
+        client.setCloseCallback({});
+    }
+
+    bool isCleanedUp() const {
+        return m_cleanedUp.load(std::memory_order_acquire);
+    }
+
+private:
+    // Ctor
+    AudioStreamer(
+        const char* uuid, const char* wsUri, responseHandler_t callback, int deflate, int heart_beat,
+        bool suppressLog, const char* extra_headers, const char* tls_cafile, const char* tls_keyfile, 
+        const char* tls_certfile, bool tls_disable_hostname_validation
+    ) : m_sessionId(uuid), m_notify(callback), m_suppress_log(suppressLog), 
+        m_extra_headers(extra_headers), m_playFile(0) {
 
         WebSocketHeaders hdrs;
         WebSocketTLSOptions tls;
@@ -41,10 +104,9 @@ public:
 
         client.setUrl(wsUri);
 
-        // Setup eventual TLS options.
-        // tls_cafile may hold the special values
-        // NONE, which disables validation and SYSTEM which uses
-        // the system CAs bundle
+        // Setup TLS options
+        // NONE - disables validation
+        // SYSTEM - uses the system CAs bundle
         if (tls_cafile) {
             tls.caFile = tls_cafile;
         }
@@ -72,58 +134,70 @@ public:
         // Set extra headers if any
         if(!hdrs.empty())
             client.setHeaders(hdrs);
+    }
 
-        // Setup a callback to be fired when a message or an event (open, close, error) is received
-        client.setMessageCallback([this](const std::string& message) {
-            if (this->isCleanedUp()) return;
-            eventCallback(MESSAGE, message.c_str());
+    void bindCallbacks(std::weak_ptr<AudioStreamer> wp) {
+        client.setMessageCallback([wp](const std::string& message) {
+            auto self = wp.lock();
+            if (!self) return;
+            if (self->isCleanedUp()) return;
+            self->eventCallback(MESSAGE, message.c_str());
         });
 
-        client.setOpenCallback([this]() {
-            cJSON *root;
-            root = cJSON_CreateObject();
+        client.setOpenCallback([wp]() {
+            auto self = wp.lock();
+            if (!self) return;
+            if (self->isCleanedUp()) return;
+
+            cJSON* root = cJSON_CreateObject();
             cJSON_AddStringToObject(root, "status", "connected");
-            char *json_str = cJSON_PrintUnformatted(root);
-            eventCallback(CONNECT_SUCCESS, json_str);
+            char* json_str = cJSON_PrintUnformatted(root);
+
+            self->eventCallback(CONNECT_SUCCESS, json_str);
+
             cJSON_Delete(root);
             switch_safe_free(json_str);
         });
 
-        client.setErrorCallback([this](int code, const std::string &msg) {
-            cJSON *root, *message;
-            root = cJSON_CreateObject();
+        client.setErrorCallback([wp](int code, const std::string& msg) {
+            auto self = wp.lock();
+            if (!self) return;
+            if (self->isCleanedUp()) return;
+
+            cJSON* root = cJSON_CreateObject();
             cJSON_AddStringToObject(root, "status", "error");
-            message = cJSON_CreateObject();
+            cJSON* message = cJSON_CreateObject();
             cJSON_AddNumberToObject(message, "code", code);
             cJSON_AddStringToObject(message, "error", msg.c_str());
             cJSON_AddItemToObject(root, "message", message);
 
-            char *json_str = cJSON_PrintUnformatted(root);
+            char* json_str = cJSON_PrintUnformatted(root);
 
-            eventCallback(CONNECT_ERROR, json_str);
+            self->eventCallback(CONNECT_ERROR, json_str);
 
             cJSON_Delete(root);
             switch_safe_free(json_str);
         });
 
-        client.setCloseCallback([this](int code, const std::string &reason) {
-            cJSON *root, *message;
-            root = cJSON_CreateObject();
+        client.setCloseCallback([wp](int code, const std::string& reason) {
+            auto self = wp.lock();
+            if (!self) return;
+            if (self->isCleanedUp()) return;
+
+            cJSON* root = cJSON_CreateObject();
             cJSON_AddStringToObject(root, "status", "disconnected");
-            message = cJSON_CreateObject();
+            cJSON* message = cJSON_CreateObject();
             cJSON_AddNumberToObject(message, "code", code);
             cJSON_AddStringToObject(message, "reason", reason.c_str());
             cJSON_AddItemToObject(root, "message", message);
-            char *json_str = cJSON_PrintUnformatted(root);
 
-            eventCallback(CONNECTION_DROPPED, json_str);
+            char* json_str = cJSON_PrintUnformatted(root);
+
+            self->eventCallback(CONNECTION_DROPPED, json_str);
 
             cJSON_Delete(root);
             switch_safe_free(json_str);
         });
-
-        // Now that our callback is setup, we can start our background thread and receive messages
-        client.connect();
     }
 
     switch_media_bug_t *get_media_bug(switch_core_session_t *session) {
@@ -158,25 +232,26 @@ public:
 
     void eventCallback(notifyEvent_t event, const char* message) {
         switch_core_session_t* psession = switch_core_session_locate(m_sessionId.c_str());
+        std::string msg = message ? std::string(message) : std::string();
+
         if(psession) {
             switch (event) {
                 case CONNECT_SUCCESS:
                     send_initial_metadata(psession);
-                    m_notify(psession, EVENT_CONNECT, message);
+                    m_notify(psession, EVENT_CONNECT, msg.c_str());
                     break;
                 case CONNECTION_DROPPED:
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "connection closed\n");
-                    m_notify(psession, EVENT_DISCONNECT, message);
+                    m_notify(psession, EVENT_DISCONNECT, msg.c_str());
                     break;
                 case CONNECT_ERROR:
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "connection error\n");
-                    m_notify(psession, EVENT_ERROR, message);
+                    m_notify(psession, EVENT_ERROR, msg.c_str());
 
                     media_bug_close(psession);
 
                     break;
                 case MESSAGE:
-                    std::string msg(message);
                     if(processMessage(psession, msg) != SWITCH_TRUE) {
                         m_notify(psession, EVENT_JSON, msg.c_str());
                     }
@@ -266,45 +341,6 @@ public:
         return status;
     }
 
-    ~AudioStreamer()= default;
-
-    void disconnect() {
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "disconnecting...\n");
-        client.disconnect();
-    }
-
-    bool isConnected() {
-        return client.isConnected();
-    }
-
-    void writeBinary(uint8_t* buffer, size_t len) {
-        if(!this->isConnected()) return;
-        client.sendBinary(buffer, len);
-    }
-
-    void writeText(const char* text) {
-        if(!this->isConnected()) return;
-        client.sendMessage(text, strlen(text));
-    }
-
-    void deleteFiles() {
-        if(m_playFile >0) {
-            for (const auto &fileName: m_Files) {
-                remove(fileName.c_str());
-            }
-        }
-    }
-
-    void markCleanedUp() {
-        m_cleanedUp.store(true, std::memory_order_release);
-        // clear callbacks to prevent dangling calls
-        client.setMessageCallback({});
-    }
-
-    bool isCleanedUp() const {
-        return m_cleanedUp.load(std::memory_order_acquire);
-    }
-
 private:
     std::string m_sessionId;
     responseHandler_t m_notify;
@@ -322,8 +358,8 @@ namespace {
     switch_status_t stream_data_init(private_t *tech_pvt, switch_core_session_t *session, char *wsUri,
                                      uint32_t sampling, int desiredSampling, int channels, char *metadata, responseHandler_t responseHandler,
                                      int deflate, int heart_beat, bool suppressLog, int rtp_packets, const char* extra_headers,
-                                     bool no_reconnect, const char *tls_cafile, const char *tls_keyfile,
-                                     const char *tls_certfile, bool tls_disable_hostname_validation)
+                                     const char *tls_cafile, const char *tls_keyfile, const char *tls_certfile, 
+                                     bool tls_disable_hostname_validation)
     {
         int err; //speex
 
@@ -343,12 +379,12 @@ namespace {
 
         //size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PERIOD * BUFFERED_SEC);
         const size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * rtp_packets);
+        
+        auto sp = AudioStreamer::create(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat,
+                                        suppressLog, extra_headers, tls_cafile, tls_keyfile,
+                                        tls_certfile, tls_disable_hostname_validation);
 
-        auto* as = new AudioStreamer(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat,
-                                        suppressLog, extra_headers, no_reconnect,
-                                        tls_cafile, tls_keyfile, tls_certfile, tls_disable_hostname_validation);
-
-        tech_pvt->pAudioStreamer = static_cast<void *>(as);
+        tech_pvt->pAudioStreamer = new std::shared_ptr<AudioStreamer>(sp);
 
         switch_mutex_init(&tech_pvt->mutex, SWITCH_MUTEX_NESTED, pool);
         
@@ -385,17 +421,6 @@ namespace {
             switch_mutex_destroy(tech_pvt->mutex);
             tech_pvt->mutex = nullptr;
         }
-        /*if (tech_pvt->pAudioStreamer) {
-            auto* as = (AudioStreamer *) tech_pvt->pAudioStreamer;
-            delete as;
-            tech_pvt->pAudioStreamer = nullptr;
-        }*/
-    }
-
-    void finish(AudioStreamer* audioStreamer) {
-        audioStreamer->markCleanedUp();
-        audioStreamer->disconnect();
-        delete audioStreamer;
     }
 
 }
@@ -490,10 +515,26 @@ extern "C" {
         auto *tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
 
         if (!tech_pvt) return SWITCH_STATUS_FALSE;
-        auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
-        if (pAudioStreamer && text) pAudioStreamer->writeText(text);
 
-        return SWITCH_STATUS_SUCCESS;
+        std::shared_ptr<AudioStreamer> streamer;
+
+        switch_mutex_lock(tech_pvt->mutex);
+
+        if (tech_pvt->pAudioStreamer) {
+            auto sp_wrap = static_cast<std::shared_ptr<AudioStreamer>*>(tech_pvt->pAudioStreamer);
+            if (sp_wrap && *sp_wrap) {
+                streamer = *sp_wrap; // copy shared_ptr
+            }
+        }
+
+        switch_mutex_unlock(tech_pvt->mutex);
+
+        if (streamer) {
+            streamer->writeText(text);
+            return SWITCH_STATUS_SUCCESS;
+        }
+
+        return SWITCH_STATUS_FALSE;
     }
 
     switch_status_t stream_session_pauseresume(switch_core_session_t *session, int pause) {
@@ -526,7 +567,6 @@ extern "C" {
         const char* buffer_size;
         const char* extra_headers;
         int rtp_packets = 1; //20ms burst
-        bool no_reconnect = false;
         const char* tls_cafile = NULL;;
         const char* tls_keyfile = NULL;;
         const char* tls_certfile = NULL;;
@@ -540,10 +580,6 @@ extern "C" {
 
         if (switch_channel_var_true(channel, "STREAM_SUPPRESS_LOG")) {
             suppressLog = true;
-        }
-
-        if (switch_channel_var_true(channel, "STREAM_NO_RECONNECT")) {
-            no_reconnect = true;
         }
 
         tls_cafile = switch_channel_get_variable(channel, "STREAM_TLS_CA_FILE");
@@ -582,8 +618,9 @@ extern "C" {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "error allocating memory!\n");
             return SWITCH_STATUS_FALSE;
         }
-        if (SWITCH_STATUS_SUCCESS != stream_data_init(tech_pvt, session, wsUri, samples_per_second, sampling, channels, metadata, responseHandler, deflate, heart_beat,
-                                                        suppressLog, rtp_packets, extra_headers, no_reconnect, tls_cafile, tls_keyfile, tls_certfile, tls_disable_hostname_validation)) {
+        if (SWITCH_STATUS_SUCCESS != stream_data_init(tech_pvt, session, wsUri, samples_per_second, sampling, channels, 
+                                                        metadata, responseHandler, deflate, heart_beat, suppressLog, rtp_packets, 
+                                                        extra_headers, tls_cafile, tls_keyfile, tls_certfile, tls_disable_hostname_validation)) {
             destroy_tech_pvt(tech_pvt);
             return SWITCH_STATUS_FALSE;
         }
@@ -595,115 +632,148 @@ extern "C" {
 
     switch_bool_t stream_frame(switch_media_bug_t *bug) {
         auto *tech_pvt = (private_t *)switch_core_media_bug_get_user_data(bug);
-        if (!tech_pvt || tech_pvt->audio_paused) return SWITCH_TRUE;
-        /*
-        auto flush_sbuffer = [&]() {
-            switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
-            if (inuse > 0) {
-                std::vector<uint8_t> tmp(inuse);
-                switch_buffer_read(tech_pvt->sbuffer, tmp.data(), inuse);
-                switch_buffer_zero(tech_pvt->sbuffer);
-                pAudioStreamer->writeBinary(tmp.data(), inuse);
-            }
-        };
-        */
-        if (switch_mutex_trylock(tech_pvt->mutex) == SWITCH_STATUS_SUCCESS) {
+        if (!tech_pvt) return SWITCH_TRUE;
+        if (tech_pvt->audio_paused || tech_pvt->cleanup_started) return SWITCH_TRUE;
+        
+        std::shared_ptr<AudioStreamer> streamer;
+        std::vector<std::vector<uint8_t>> pending_send;
 
-            if (!tech_pvt->pAudioStreamer) {
-                switch_mutex_unlock(tech_pvt->mutex);
-                return SWITCH_TRUE;
-            }
+        if (switch_mutex_trylock(tech_pvt->mutex) != SWITCH_STATUS_SUCCESS) {
+            return SWITCH_TRUE;
+        }
 
-            auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
+        if (!tech_pvt->pAudioStreamer) {
+            switch_mutex_unlock(tech_pvt->mutex);
+            return SWITCH_TRUE;
+        }
 
-            if (!pAudioStreamer->isConnected()) {
-                switch_mutex_unlock(tech_pvt->mutex);
-                return SWITCH_TRUE;
-            }
+        auto sp_ptr = static_cast<std::shared_ptr<AudioStreamer>*>(tech_pvt->pAudioStreamer);
+        if (!sp_ptr || !(*sp_ptr)) {
+            switch_mutex_unlock(tech_pvt->mutex);
+            return SWITCH_TRUE;
+        }
 
-            if (nullptr == tech_pvt->resampler) {
-                
-                uint8_t data_buf[SWITCH_RECOMMENDED_BUFFER_SIZE];
-                switch_frame_t frame = {0};
-                frame.data = data_buf;
-                frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
-                size_t available = switch_buffer_freespace(tech_pvt->sbuffer);
+        streamer = *sp_ptr;
 
-                while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
-                    if (frame.datalen) {
-                        if (1 == tech_pvt->rtp_packets) {
-                            pAudioStreamer->writeBinary((uint8_t *) frame.data, frame.datalen);
-                            continue;
-                        }
-                        if (available >= frame.datalen) {
-                            switch_buffer_write(tech_pvt->sbuffer, static_cast<uint8_t *>(frame.data), frame.datalen);
-                        }
-                        if (0 == switch_buffer_freespace(tech_pvt->sbuffer)) {
-                            switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
-                            if (inuse > 0) {
-                                std::vector<uint8_t> tmp(inuse);
-                                switch_buffer_read(tech_pvt->sbuffer, tmp.data(), inuse);
-                                switch_buffer_zero(tech_pvt->sbuffer);
-                                pAudioStreamer->writeBinary(tmp.data(), inuse);
-                            }
-                        }
-                    }
+        auto *resampler = tech_pvt->resampler;
+        const int channels = tech_pvt->channels;
+        const int rtp_packets = tech_pvt->rtp_packets;
+
+        if (nullptr == resampler) {
+            
+            uint8_t data_buf[SWITCH_RECOMMENDED_BUFFER_SIZE];
+            switch_frame_t frame = {};
+            frame.data = data_buf;
+            frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
+
+            while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
+                if (!frame.datalen) {
+                    continue;
                 }
+
+                if (rtp_packets == 1) {
+                    pending_send.emplace_back((uint8_t*)frame.data, (uint8_t*)frame.data + frame.datalen);
+                    continue;
+                }
+
+                size_t freespace = switch_buffer_freespace(tech_pvt->sbuffer);
                 
-            } else {
+                if (freespace >= frame.datalen) {
+                    switch_buffer_write(tech_pvt->sbuffer, static_cast<uint8_t *>(frame.data), frame.datalen);
+                }
 
-                uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
-                switch_frame_t frame = {};
-                frame.data = data;
-                frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
-                const size_t available = switch_buffer_freespace(tech_pvt->sbuffer);
-
-                while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
-                    if(frame.datalen) {
-                        spx_uint32_t in_len = frame.samples;
-                        spx_uint32_t out_len = (available / (tech_pvt->channels * sizeof(spx_int16_t)));
-                        spx_int16_t out[available / sizeof(spx_int16_t)];
-
-                        if(tech_pvt->channels == 1) {
-                            speex_resampler_process_int(tech_pvt->resampler,
-                                            0,
-                                            (const spx_int16_t *)frame.data,
-                                            &in_len,
-                                            &out[0],
-                                            &out_len);
-                        } else {
-                            speex_resampler_process_interleaved_int(tech_pvt->resampler,
-                                            (const spx_int16_t *)frame.data,
-                                            &in_len,
-                                            &out[0],
-                                            &out_len);
-                        }
-
-                        if(out_len > 0) {
-                            const size_t bytes_written = out_len * tech_pvt->channels * sizeof(spx_int16_t);
-                            if (tech_pvt->rtp_packets == 1) { //20ms packet
-                                pAudioStreamer->writeBinary((uint8_t *) out, bytes_written);
-                                continue;
-                            }
-                            if (bytes_written <= available) {
-                                switch_buffer_write(tech_pvt->sbuffer, (const uint8_t *)out, bytes_written);
-                            }
-                        }
-
-                        if(switch_buffer_freespace(tech_pvt->sbuffer) == 0) {
-                            switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
-                            if (inuse > 0) {
-                                std::vector<uint8_t> tmp(inuse);
-                                switch_buffer_read(tech_pvt->sbuffer, tmp.data(), inuse);
-                                switch_buffer_zero(tech_pvt->sbuffer);
-                                pAudioStreamer->writeBinary(tmp.data(), inuse);
-                            }
-                        }
+                if (switch_buffer_freespace(tech_pvt->sbuffer) == 0) {
+                    switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
+                    if (inuse > 0) {
+                        std::vector<uint8_t> tmp(inuse);
+                        switch_buffer_read(tech_pvt->sbuffer, tmp.data(), inuse);
+                        switch_buffer_zero(tech_pvt->sbuffer);
+                        pending_send.emplace_back(std::move(tmp));
                     }
                 }
             }
             
-            switch_mutex_unlock(tech_pvt->mutex);
+        } else {
+
+            uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
+            switch_frame_t frame = {};
+            frame.data = data;
+            frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
+
+            while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
+                if(!frame.datalen) {
+                    continue;
+                }
+
+                const size_t freespace = switch_buffer_freespace(tech_pvt->sbuffer);
+                spx_uint32_t in_len = frame.samples;
+                spx_uint32_t out_len = (freespace / (tech_pvt->channels * sizeof(spx_int16_t)));
+                
+                if(out_len == 0) {
+                    if(freespace == 0) {
+                        switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
+                        if (inuse > 0) {
+                            std::vector<uint8_t> tmp(inuse);
+                            switch_buffer_read(tech_pvt->sbuffer, tmp.data(), inuse);
+                            switch_buffer_zero(tech_pvt->sbuffer);
+                            pending_send.emplace_back(std::move(tmp));
+                        }
+                    }
+                    continue;
+                }
+
+                std::vector<spx_int16_t> out;
+                out.resize((size_t)out_len * (size_t)channels);
+
+                if(channels == 1) {
+                    speex_resampler_process_int(resampler,
+                                    0,
+                                    (const spx_int16_t *)frame.data,
+                                    &in_len,
+                                    out.data(),
+                                    &out_len);
+                } else {
+                    speex_resampler_process_interleaved_int(resampler,
+                                    (const spx_int16_t *)frame.data,
+                                    &in_len,
+                                    out.data(),
+                                    &out_len);
+                }
+
+                if(out_len > 0) {
+                    const size_t bytes_written = (size_t)out_len * (size_t)channels * sizeof(spx_int16_t);
+
+                    if (rtp_packets == 1) { //20ms packet
+                        const uint8_t* p = (const uint8_t*)out.data();
+                        pending_send.emplace_back(p, p + bytes_written);
+                        continue;
+                    }
+
+                    if (bytes_written <= switch_buffer_freespace(tech_pvt->sbuffer)) {
+                        switch_buffer_write(tech_pvt->sbuffer, (const uint8_t *)out.data(), bytes_written);
+                    }
+                }
+
+                if (switch_buffer_freespace(tech_pvt->sbuffer) == 0) {
+                    switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
+                    if (inuse > 0) {
+                        std::vector<uint8_t> tmp(inuse);
+                        switch_buffer_read(tech_pvt->sbuffer, tmp.data(), inuse);
+                        switch_buffer_zero(tech_pvt->sbuffer);
+                        pending_send.emplace_back(std::move(tmp));
+                    }
+                }
+            }
+        }
+        
+        switch_mutex_unlock(tech_pvt->mutex);
+    
+        if (!streamer || !streamer->isConnected()) return SWITCH_TRUE;
+
+        for (auto &chunk : pending_send) {
+            if (!chunk.empty()) {
+                streamer->writeBinary(chunk.data(), chunk.size());
+            }
         }
 
         return SWITCH_TRUE;
@@ -717,7 +787,9 @@ extern "C" {
             auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
             char sessionId[MAX_SESSION_ID];
             strcpy(sessionId, tech_pvt->sessionId);
-            AudioStreamer* audioStreamer = nullptr;
+
+            std::shared_ptr<AudioStreamer>* sp_wrap = nullptr;
+            std::shared_ptr<AudioStreamer> streamer;
 
             switch_mutex_lock(tech_pvt->mutex);
 
@@ -730,20 +802,31 @@ extern "C" {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) stream_session_cleanup\n", sessionId);
 
             switch_channel_set_private(channel, MY_BUG_NAME, nullptr);
+
+            sp_wrap = static_cast<std::shared_ptr<AudioStreamer>*>(tech_pvt->pAudioStreamer);
+            tech_pvt->pAudioStreamer = nullptr;
+
+            if (sp_wrap && *sp_wrap) {
+                streamer = *sp_wrap;
+            }
+
+            switch_mutex_unlock(tech_pvt->mutex);
+
             if (!channelIsClosing) {
                 switch_core_media_bug_remove(session, &bug);
             }
 
-            //auto* audioStreamer = (AudioStreamer *) tech_pvt->pAudioStreamer;
-            audioStreamer = (AudioStreamer*) tech_pvt->pAudioStreamer;
-            tech_pvt->pAudioStreamer = nullptr;
+            if (sp_wrap) {
+                delete sp_wrap;
+                sp_wrap = nullptr;
+            }
 
-            switch_mutex_unlock(tech_pvt->mutex);
-
-            if(audioStreamer) {
-                audioStreamer->deleteFiles();
-                if (text) audioStreamer->writeText(text);
-                finish(audioStreamer);
+            if(streamer) {
+                streamer->deleteFiles();
+                if (text) streamer->writeText(text);
+                
+                streamer->markCleanedUp();
+                streamer->disconnect();
             }
 
             destroy_tech_pvt(tech_pvt);
@@ -756,4 +839,3 @@ extern "C" {
         return SWITCH_STATUS_FALSE;
     }
 }
-

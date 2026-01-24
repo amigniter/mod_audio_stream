@@ -1,3 +1,11 @@
+mod-audio-stream (1.0.0-3) UNRELEASED; urgency=medium
+
+  * Added std::shared_ptr/std::weak_ptr for proper lifetime management.
+  * WebSocket callbacks safely check for object existence.
+  * Update to libwsc 1.1.0 for better thread synchronization.
+
+ -- Milan M. <amsoftswitch@gmail.com>  Thu, 22 Jan 2026 14:30:00 +0200
+
 mod-audio-stream (1.0.0-2) UNRELEASED; urgency=low
 
   * Introduced libwsc.

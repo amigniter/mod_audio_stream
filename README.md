@@ -211,6 +211,8 @@ There is an error with the connection. Multiple fields will be available on the 
 | 7    | `TLS_INIT_FAILED`     | Couldn't initialize SSL/TLS context                  |
 | 8    | `SSL_HANDSHAKE_FAILED`| SSL/TLS handshake with server failed                 |
 | 9    | `SSL_ERROR`           | Generic OpenSSL error (certificate, cipher, etc.)    |
+| 10   | `TIMEOUT`             | Timeout                                              |
+| 11   | `PROTOCOL`            | WebSocket protocol error                             |
 
 
 ### play
