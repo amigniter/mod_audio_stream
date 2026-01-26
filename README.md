@@ -1,21 +1,39 @@
 # mod_audio_stream
 
-A FreeSWITCH module that streams L16 audio from a channel to a websocket endpoint. If websocket sends back responses (eg. JSON) it can be effectively used with ASR engines such as IBM Watson etc., or any other purpose you find applicable.
+**Production-grade WebSocket audio streaming for FreeSWITCH.**
+
+Streams real-time audio between FreeSWITCH and external systems with correct lifecycle management, thread safety and predictable memory usage.
 
 ### Update (22/2/2025)
 
-#### :rocket: **Introducing Bi-Directional Streaming with automatic playback**
+#### :rocket: **Introducing Bi-Directional Streaming with Automatic Playback**
 
-A new version `mod-audio-stream v1.0.3` has been published, featuring **raw binary stream** from the websocket.
-It can be downloaded from the **Releases** section (pre-release) and comes as a pre-built Debian 12 package.
+A new version, **mod_audio_stream v1.0.3**, has been published, featuring raw binary audio streaming over WebSocket.
+It can be downloaded from the Releases section and is available as a pre-built Debian 12 package.
 
-- Playback feature allows continuous forward streaming while the playback runs independently.
-- It is a **full-duplex streamer** between the caller and the websocket.
-- It supports **base64 encoded audio** as well as the **raw binary stream** from the websocket.
-- Playback can be **tracked, paused, or resumed** dynamically.
+The playback feature allows continuous forward streaming while playback runs independently, enabling full-duplex audio between the caller and the WebSocket endpoint.
 
-:small_blue_diamond: This release is a commercial product that is available for **free use**, including commercial use, with a limitation of **10 concurrent streaming channels**. For users requiring more than 10 channels, or access to the source code, please [contact us](mailto:amsoftswitch@gmail.com)
- for further information and licensing options.
+Key features:
+
+- Full-duplex audio streaming (caller ↔ WebSocket)
+- Supports both base64-encoded and raw binary audio
+- Playback can be tracked, paused, and resumed dynamically
+
+🔹 This release is a **commercial product**, available for free use (including commercial use) with a `limitation of 10 concurrent streaming channels`.
+For users requiring more than 10 channels, or access to the source code, please [contact us](mailto:amsoftswitch@gmail.com) for licensing options.
+
+#### Why the Commercial Edition Exists
+
+The community edition of `mod_audio_stream` provides production-ready, uni-directional WebSocket audio streaming for ASR and real-time audio processing use cases.
+The commercial edition exists because real-world telephony systems require solving several non-trivial engineering problems that only appear under **real concurrency and production load**, such as:
+
+- correct FreeSWITCH session lifecycle management
+- thread-safe audio injection and shutdown
+- safe reconnection and cleanup under load
+- bounded and predictable memory usage
+- correct interaction with record_session / uuid_record
+
+The commercial edition is designed and tested for **high-concurrency environments (thousands of simultaneous calls, 5000+)**, where correctness, stability and resource usage are critical.
 
 ### About
 
