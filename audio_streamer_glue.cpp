@@ -5,11 +5,11 @@
 #include <switch_json.h>
 #include <fstream>
 #include <switch_buffer.h>
-#include <unordered_map>
 #include <unordered_set>
 #include <atomic>
 #include <vector>
 #include <memory>
+#include <mutex>
 #include "base64.h"
 
 #define FRAME_SIZE_8000  320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
@@ -57,10 +57,20 @@ public:
     }
 
     void deleteFiles() {
-        if(m_playFile >0) {
-            for (const auto &fileName: m_Files) {
-                remove(fileName.c_str());
-            }
+        std::vector<std::string> files;
+
+        {
+            std::lock_guard<std::mutex> lk(m_stateMutex);
+            if (m_Files.empty())
+                return;
+
+            files.assign(m_Files.begin(), m_Files.end());
+            m_Files.clear();
+            m_playFile = 0;
+        }
+
+        for (const auto& fn : files) {
+            ::remove(fn.c_str());
         }
     }
 
@@ -134,6 +144,16 @@ private:
         // Set extra headers if any
         if(!hdrs.empty())
             client.setHeaders(hdrs);
+    }
+
+    struct ProcessResult {
+        switch_bool_t ok = SWITCH_FALSE;
+        std::string rewrittenJsonData;
+        std::vector<std::string> errors;
+    };
+
+    static inline void push_err(ProcessResult& out, const std::string& sid, const std::string& s) {
+        out.errors.push_back("(" + sid + ") " + s);
     }
 
     void bindCallbacks(std::weak_ptr<AudioStreamer> wp) {
@@ -231,114 +251,180 @@ private:
     }
 
     void eventCallback(notifyEvent_t event, const char* message) {
-        switch_core_session_t* psession = switch_core_session_locate(m_sessionId.c_str());
-        std::string msg = message ? std::string(message) : std::string();
+        std::string msg = message ? message : "";
 
-        if(psession) {
-            switch (event) {
-                case CONNECT_SUCCESS:
-                    send_initial_metadata(psession);
-                    m_notify(psession, EVENT_CONNECT, msg.c_str());
-                    break;
-                case CONNECTION_DROPPED:
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "connection closed\n");
-                    m_notify(psession, EVENT_DISCONNECT, msg.c_str());
-                    break;
-                case CONNECT_ERROR:
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "connection error\n");
-                    m_notify(psession, EVENT_ERROR, msg.c_str());
-
-                    media_bug_close(psession);
-
-                    break;
-                case MESSAGE:
-                    if(processMessage(psession, msg) != SWITCH_TRUE) {
-                        m_notify(psession, EVENT_JSON, msg.c_str());
-                    }
-                    if(!m_suppress_log)
-                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG, "response: %s\n", msg.c_str());
-                    break;
+        // processing without holding a session
+        ProcessResult pr;
+        if (event == MESSAGE) {
+            pr = processMessage(msg);
+            if (pr.ok == SWITCH_TRUE) {
+                msg = pr.rewrittenJsonData; // overwrite only on success
             }
-            switch_core_session_rwunlock(psession);
         }
+
+        switch_core_session_t* psession = switch_core_session_locate(m_sessionId.c_str());
+        if (!psession) {
+            return;
+        }
+
+        for (const auto& e : pr.errors) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR, "%s\n", e.c_str());
+        }
+
+        switch (event) {
+            case CONNECT_SUCCESS:
+                send_initial_metadata(psession);
+                m_notify(psession, EVENT_CONNECT, msg.c_str());
+                break;
+
+            case CONNECTION_DROPPED:
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "connection closed\n");
+                m_notify(psession, EVENT_DISCONNECT, msg.c_str());
+                break;
+
+            case CONNECT_ERROR:
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "connection error\n");
+                m_notify(psession, EVENT_ERROR, msg.c_str());
+                media_bug_close(psession);
+                break;
+
+            case MESSAGE:
+                if (pr.ok == SWITCH_TRUE) {
+                    m_notify(psession, EVENT_PLAY, msg.c_str());
+                } else {
+                    // fall back to EVENT_JSON
+                    m_notify(psession, EVENT_JSON, msg.c_str());
+                }
+
+                if (!m_suppress_log) {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
+                                    "response: %s\n", msg.c_str());
+                }
+                break;
+        }
+
+        switch_core_session_rwunlock(psession);
     }
 
-    switch_bool_t processMessage(switch_core_session_t* session, std::string& message) {
-        cJSON* json = cJSON_Parse(message.c_str());
-        switch_bool_t status = SWITCH_FALSE;
-        if (!json) {
-            return status;
+
+    ProcessResult processMessage(const std::string& message) {
+        ProcessResult out;
+
+        // RAII
+        using jsonPtr = std::unique_ptr<cJSON, decltype(&cJSON_Delete)>;
+        jsonPtr root(cJSON_Parse(message.c_str()), &cJSON_Delete);
+        if (!root) return out;
+
+        const char* jsonType = cJSON_GetObjectCstr(root.get(), "type");
+        if (!jsonType || std::strcmp(jsonType, "streamAudio") != 0) {
+            return out; // not ours
         }
-        const char* jsType = cJSON_GetObjectCstr(json, "type");
-        if(jsType && strcmp(jsType, "streamAudio") == 0) {
-            cJSON* jsonData = cJSON_GetObjectItem(json, "data");
-            if(jsonData) {
-                cJSON* jsonFile = nullptr;
-                cJSON* jsonAudio = cJSON_DetachItemFromObject(jsonData, "audioData");
-                const char* jsAudioDataType = cJSON_GetObjectCstr(jsonData, "audioDataType");
-                std::string fileType;
-                int sampleRate;
-                if (0 == strcmp(jsAudioDataType, "raw")) {
-                    cJSON* jsonSampleRate = cJSON_GetObjectItem(jsonData, "sampleRate");
-                    sampleRate = jsonSampleRate && jsonSampleRate->valueint ? jsonSampleRate->valueint : 0;
-                    std::unordered_map<int, const char*> sampleRateMap = {
-                            {8000, ".r8"},
-                            {16000, ".r16"},
-                            {24000, ".r24"},
-                            {32000, ".r32"},
-                            {48000, ".r48"},
-                            {64000, ".r64"}
-                    };
-                    auto it = sampleRateMap.find(sampleRate);
-                    fileType = (it != sampleRateMap.end()) ? it->second : "";
-                } else if (0 == strcmp(jsAudioDataType, "wav")) {
-                    fileType = ".wav";
-                } else if (0 == strcmp(jsAudioDataType, "mp3")) {
-                    fileType = ".mp3";
-                } else if (0 == strcmp(jsAudioDataType, "ogg")) {
-                    fileType = ".ogg";
-                } else {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - unsupported audio type: %s\n",
-                                      m_sessionId.c_str(), jsAudioDataType);
-                }
 
-                if(jsonAudio && jsonAudio->valuestring != nullptr && !fileType.empty()) {
-                    char filePath[256];
-                    std::string rawAudio;
-                    try {
-                        rawAudio = base64_decode(jsonAudio->valuestring);
-                    } catch (const std::exception& e) {
-                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - base64 decode error: %s\n",
-                                          m_sessionId.c_str(), e.what());
-                        cJSON_Delete(jsonAudio); cJSON_Delete(json);
-                        return status;
-                    }
-                    switch_snprintf(filePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir,
-                                    SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++, fileType.c_str());
-                    std::ofstream fstream(filePath, std::ofstream::binary);
-                    fstream << rawAudio;
-                    fstream.close();
-                    m_Files.insert(filePath);
-                    jsonFile = cJSON_CreateString(filePath);
-                    cJSON_AddItemToObject(jsonData, "file", jsonFile);
-                }
+        cJSON* jsonData = cJSON_GetObjectItem(root.get(), "data");
+        if (!jsonData) {
+            push_err(out, m_sessionId, "processMessage - no data in streamAudio");
+            return out;
+        }
 
-                if(jsonFile) {
-                    char *jsonString = cJSON_PrintUnformatted(jsonData);
-                    m_notify(session, EVENT_PLAY, jsonString);
-                    message.assign(jsonString);
-                    free(jsonString);
-                    status = SWITCH_TRUE;
-                }
-                if (jsonAudio)
-                    cJSON_Delete(jsonAudio);
+        const char* jsAudioDataType = cJSON_GetObjectCstr(jsonData, "audioDataType");
+        if (!jsAudioDataType) jsAudioDataType = "";
 
-            } else {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - no data in streamAudio\n", m_sessionId.c_str());
+        jsonPtr jsonAudio(cJSON_DetachItemFromObject(jsonData, "audioData"), &cJSON_Delete);
+
+        if (!jsonAudio) {
+            push_err(out, m_sessionId, "processMessage - streamAudio missing 'audioData' field");
+            return out;
+        }
+
+        if (!cJSON_IsString(jsonAudio.get()) || !jsonAudio->valuestring) {
+            push_err(out, m_sessionId, "processMessage - 'audioData' is not a string (expected base64 string)");
+            return out;
+        }
+
+        // sampleRate (only meaningful for raw)
+        int sampleRate = 0;
+        if (cJSON* jsonSampleRate = cJSON_GetObjectItem(jsonData, "sampleRate")) {
+            sampleRate = jsonSampleRate->valueint;
+        }
+
+        // map file type
+        std::string fileType;
+        if (std::strcmp(jsAudioDataType, "raw") == 0) {
+            switch (sampleRate) {
+                case 8000:  fileType = ".r8";  break;
+                case 16000: fileType = ".r16"; break;
+                case 24000: fileType = ".r24"; break;
+                case 32000: fileType = ".r32"; break;
+                case 48000: fileType = ".r48"; break;
+                case 64000: fileType = ".r64"; break;
+                default:
+                    push_err(out, m_sessionId, "processMessage - unsupported sample rate: " + std::to_string(sampleRate));
+                    return out;
+            }
+        } else if (std::strcmp(jsAudioDataType, "wav") == 0)  fileType = ".wav";
+        else if (std::strcmp(jsAudioDataType, "mp3") == 0)   fileType = ".mp3";
+        else if (std::strcmp(jsAudioDataType, "ogg") == 0)   fileType = ".ogg";
+        else if (std::strcmp(jsAudioDataType, "pcmu") == 0)  fileType = ".pcmu";
+        else if (std::strcmp(jsAudioDataType, "pcma") == 0)  fileType = ".pcma";
+        else {
+            push_err(out, m_sessionId, "processMessage - unsupported audio type: " + std::string(jsAudioDataType));
+            return out;
+        }
+
+        // base64 decode
+        std::string decoded;
+        try {
+            decoded = base64_decode(jsonAudio->valuestring);
+        } catch (const std::exception& e) {
+            push_err(out, m_sessionId, "processMessage - base64 decode error: " + std::string(e.what()));
+            return out;
+        }
+
+        // reserve file index
+        int idx = 0;
+        {
+            std::lock_guard<std::mutex> lk(m_stateMutex);
+            idx = m_playFile++;
+        }
+
+        char filePath[256];
+        switch_snprintf(filePath, sizeof(filePath), "%s%s%s_%d.tmp%s",
+                        SWITCH_GLOBAL_dirs.temp_dir, SWITCH_PATH_SEPARATOR,
+                        m_sessionId.c_str(), idx, fileType.c_str());
+
+        // write file
+        {
+            std::ofstream f(filePath, std::ios::binary);
+            if (!f.is_open()) {
+                push_err(out, m_sessionId, std::string("processMessage - failed to open file for write: ") + filePath);
+                return out;
+            }
+            f.write(decoded.data(), static_cast<std::streamsize>(decoded.size()));
+            if (!f.good()) {
+                push_err(out, m_sessionId, std::string("processMessage - failed writing file: ") + filePath);
+                return out;
             }
         }
-        cJSON_Delete(json);
-        return status;
+
+        // track file for cleanup
+        {
+            std::lock_guard<std::mutex> lk(m_stateMutex);
+            m_Files.insert(filePath);
+        }
+
+        cJSON_AddItemToObject(jsonData, "file", cJSON_CreateString(filePath));
+
+        // return rewritten jsonData as string
+        char* jsonString = cJSON_PrintUnformatted(jsonData);
+        if (!jsonString) {
+            push_err(out, m_sessionId, "processMessage - cJSON_PrintUnformatted failed");
+            return out;
+        }
+
+        out.rewrittenJsonData.assign(jsonString);
+        std::free(jsonString);
+        out.ok = SWITCH_TRUE;
+        return out;
     }
 
 private:
@@ -350,6 +436,7 @@ private:
     int m_playFile;
     std::unordered_set<std::string> m_Files;
     std::atomic<bool> m_cleanedUp{false};
+    std::mutex m_stateMutex;
 };
 
 
