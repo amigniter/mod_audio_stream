@@ -493,6 +493,20 @@ private:
 
 namespace {
 
+    // Helpers used by both AudioStreamer message processing and stream_data_init
+    static inline size_t pcm16_bytes_per_ms(int sampleRate, int channels) {
+        if (sampleRate <= 0 || channels <= 0) return 0;
+        // sampleRate samples/sec * 2 bytes/sample * channels / 1000
+        return (size_t)sampleRate * 2u * (size_t)channels / 1000u;
+    }
+
+    static inline void drop_oldest_from_buffer(switch_buffer_t* buf, switch_size_t bytes) {
+        if (!buf || bytes == 0) return;
+        std::vector<uint8_t> tmp;
+        tmp.resize((size_t)bytes);
+        switch_buffer_read(buf, tmp.data(), bytes);
+    }
+
     switch_status_t stream_data_init(private_t *tech_pvt, switch_core_session_t *session, char *wsUri,
                                      uint32_t sampling, int desiredSampling, int channels, char *metadata, responseHandler_t responseHandler,
                                      int deflate, int heart_beat, bool suppressLog, int rtp_packets, const char* extra_headers,
