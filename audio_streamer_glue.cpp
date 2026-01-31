@@ -4,6 +4,7 @@
 #include "WebSocketClient.h"
 #include <switch_json.h>
 #include <fstream>
+#include <sstream>
 #include <switch_buffer.h>
 #include <unordered_set>
 #include <atomic>
@@ -13,6 +14,8 @@
 #include "base64.h"
 #include <algorithm>
 #include <climits>
+
+#define MOD_AUDIO_STREAM_VERSION "1.0.1"
 
 #define FRAME_SIZE_8000  320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
 
@@ -267,10 +270,25 @@ private:
             return;
         }
 
+        /* Verbose: log inbound WS activity for this session */
+        if (event == MESSAGE) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
+                              "(%s) eventCallback: incoming MESSAGE size=%zu\n",
+                              m_sessionId.c_str(), msg.size());
+            if (msg.size() > 512) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
+                                  "(%s) eventCallback: message snippet=%.512s...\n",
+                                  m_sessionId.c_str(), msg.c_str());
+            }
+        }
+
         // processing without holding a session (but we now have access to tech_pvt)
         ProcessResult pr;
         if (event == MESSAGE) {
             pr = processMessage(psession, msg);
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
+                              "(%s) processMessage result: ok=%d errors=%zu\n",
+                              m_sessionId.c_str(), pr.ok == SWITCH_TRUE ? 1 : 0, pr.errors.size());
             if (pr.ok == SWITCH_TRUE) {
                 msg = pr.rewrittenJsonData; // overwrite only on success
             }
@@ -299,15 +317,19 @@ private:
 
             case MESSAGE:
                 if (pr.ok == SWITCH_TRUE) {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
+                                      "(%s) PUSHBACK accepted -> EVENT_PLAY\n", m_sessionId.c_str());
                     m_notify(psession, EVENT_PLAY, msg.c_str());
                 } else {
                     // fall back to EVENT_JSON
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
+                                      "(%s) MESSAGE treated as generic JSON\n", m_sessionId.c_str());
                     m_notify(psession, EVENT_JSON, msg.c_str());
                 }
 
                 if (!m_suppress_log) {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
-                                    "response: %s\n", msg.c_str());
+                                    "response (v%s): %s\n", MOD_AUDIO_STREAM_VERSION, msg.c_str());
                 }
                 break;
         }
@@ -336,17 +358,36 @@ private:
         // RAII
         using jsonPtr = std::unique_ptr<cJSON, decltype(&cJSON_Delete)>;
         jsonPtr root(cJSON_Parse(message.c_str()), &cJSON_Delete);
-        if (!root) return out;
-
-        const char* jsonType = cJSON_GetObjectCstr(root.get(), "type");
-        if (!jsonType || std::strcmp(jsonType, "streamAudio") != 0) {
-            return out; // not ours
+        if (!root) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
+                              "(%s) processMessage: invalid JSON or empty message\n", m_sessionId.c_str());
+            return out;
         }
 
-        cJSON* jsonData = cJSON_GetObjectItem(root.get(), "data");
-        if (!jsonData) {
-            push_err(out, m_sessionId, "processMessage - no data in streamAudio");
-            return out;
+        const char* jsonType = cJSON_GetObjectCstr(root.get(), "type");
+        cJSON* jsonData = nullptr;
+
+        if (!jsonType || std::strcmp(jsonType, "streamAudio") != 0) {
+            // Accept a shorthand/unwrapped payload where the root object is the data
+            // (some senders post {"audioDataType":..., "file":...} directly).
+            if (cJSON_GetObjectItem(root.get(), "audioData") || cJSON_GetObjectItem(root.get(), "file") || cJSON_GetObjectItem(root.get(), "audioDataType")) {
+                jsonData = root.get();
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
+                                  "(%s) processMessage: treating root as data shorthand\n", m_sessionId.c_str());
+            } else {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
+                                  "(%s) processMessage ignored (expected type=streamAudio). raw=%s\n",
+                                  m_sessionId.c_str(), message.c_str());
+                return out; // not ours
+            }
+        } else {
+            jsonData = cJSON_GetObjectItem(root.get(), "data");
+            if (!jsonData) {
+                push_err(out, m_sessionId, "processMessage - no data in streamAudio");
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
+                                  "(%s) processMessage - no data object in streamAudio\n", m_sessionId.c_str());
+                return out;
+            }
         }
 
         const char* jsAudioDataType = cJSON_GetObjectCstr(jsonData, "audioDataType");
@@ -354,25 +395,65 @@ private:
 
         jsonPtr jsonAudio(cJSON_DetachItemFromObject(jsonData, "audioData"), &cJSON_Delete);
 
-        if (!jsonAudio) {
-            push_err(out, m_sessionId, "processMessage - streamAudio missing 'audioData' field");
-            return out;
-        }
+        std::string decoded;
+        bool decoded_from_file = false;
 
-        if (!cJSON_IsString(jsonAudio.get()) || !jsonAudio->valuestring) {
-            push_err(out, m_sessionId, "processMessage - 'audioData' is not a string (expected base64 string)");
-            return out;
-        }
+        if (jsonAudio && cJSON_IsString(jsonAudio.get()) && jsonAudio->valuestring) {
+            // Basic size guard for base64 string
+            const size_t b64len = std::strlen(jsonAudio->valuestring);
+            if (b64len == 0) {
+                push_err(out, m_sessionId, "processMessage - 'audioData' is empty");
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
+                                  "(%s) processMessage - audioData empty\n", m_sessionId.c_str());
+                return out;
+            }
+            if (b64len > MAX_AUDIO_BASE64_LEN) {
+                push_err(out, m_sessionId, "processMessage - 'audioData' too large");
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
+                                  "(%s) processMessage - audioData too large: %zu\n", m_sessionId.c_str(), b64len);
+                return out;
+            }
 
-        // Basic size guard
-        const size_t b64len = std::strlen(jsonAudio->valuestring);
-        if (b64len == 0) {
-            push_err(out, m_sessionId, "processMessage - 'audioData' is empty");
-            return out;
-        }
-        if (b64len > MAX_AUDIO_BASE64_LEN) {
-            push_err(out, m_sessionId, "processMessage - 'audioData' too large");
-            return out;
+            // base64 decode
+            try {
+                decoded = base64_decode(jsonAudio->valuestring);
+            } catch (const std::exception& e) {
+                push_err(out, m_sessionId, "processMessage - base64 decode error: " + std::string(e.what()));
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
+                                  "(%s) processMessage - base64 decode exception: %s\n", m_sessionId.c_str(), e.what());
+                return out;
+            }
+        } else {
+            // No inline base64 audio; check for a file path (older workflow). This allows the
+            // existing sender behavior that posts a temporary file path.
+            cJSON* jsonFile = cJSON_GetObjectItem(jsonData, "file");
+            if (jsonFile && cJSON_IsString(jsonFile) && jsonFile->valuestring) {
+                const char* filepath = jsonFile->valuestring;
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
+                                  "(%s) processMessage: attempting to read file payload %s\n",
+                                  m_sessionId.c_str(), filepath);
+
+                // Read file contents
+                std::ifstream ifs(filepath, std::ios::binary);
+                if (!ifs) {
+                    push_err(out, m_sessionId, "processMessage - cannot open file: " + std::string(filepath));
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
+                                      "(%s) processMessage - cannot open file: %s\n", m_sessionId.c_str(), filepath);
+                    return out;
+                }
+                std::ostringstream ss;
+                ss << ifs.rdbuf();
+                decoded = ss.str();
+                decoded_from_file = true;
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
+                                  "(%s) processMessage: read file %s size=%zu\n",
+                                  m_sessionId.c_str(), filepath, decoded.size());
+            } else {
+                push_err(out, m_sessionId, "processMessage - streamAudio missing 'audioData' field and no 'file' provided");
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
+                                  "(%s) processMessage - missing audioData field and no file\n", m_sessionId.c_str());
+                return out;
+            }
         }
 
         // sampleRate (only meaningful for raw)
@@ -385,30 +466,31 @@ private:
         // (Other formats can be supported later via decode pipeline, but that adds latency.)
         if (std::strcmp(jsAudioDataType, "raw") != 0) {
             push_err(out, m_sessionId, "processMessage - unsupported audio type for realtime injection: " + std::string(jsAudioDataType));
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
+                              "(%s) processMessage - unsupported audioDataType=%s\n", m_sessionId.c_str(), jsAudioDataType);
             return out;
         }
 
         if (sampleRate <= 0) {
             push_err(out, m_sessionId, "processMessage - missing/invalid sampleRate for raw audio");
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
+                              "(%s) processMessage - missing/invalid sampleRate\n", m_sessionId.c_str());
             return out;
         }
 
-        // base64 decode
-        std::string decoded;
-        try {
-            decoded = base64_decode(jsonAudio->valuestring);
-        } catch (const std::exception& e) {
-            push_err(out, m_sessionId, "processMessage - base64 decode error: " + std::string(e.what()));
-            return out;
-        }
-
+        // (decoded is either set from inline base64 earlier, or read from file)
         if (decoded.empty()) {
             push_err(out, m_sessionId, "processMessage - decoded audio is empty");
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
+                              "(%s) processMessage - decoded audio empty after base64/file read\n", m_sessionId.c_str());
             return out;
         }
 
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
+                          "(%s) processMessage: decoded_bytes=%zu sampleRate=%d\n",
+                          m_sessionId.c_str(), decoded.size(), sampleRate);
+
         // Ensure we have whole PCM16 samples.
-        const size_t bytes_per_sample_frame = (size_t)2u * (size_t)1u; // PCM16, mono by default
         // If caller is stereo, we still inject mono unless you extend the protocol.
         // Frame replacement code in mod_audio_stream.c uses the call's channel count.
         // To avoid mismatched channel layouts, we default to mono injection.
@@ -421,6 +503,8 @@ private:
         switch_media_bug_t* bug = get_media_bug(psession);
         if (!bug) {
             push_err(out, m_sessionId, "processMessage - no media bug for injection");
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
+                              "(%s) processMessage - no media bug (can't inject)\n", m_sessionId.c_str());
             return out;
         }
         auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
@@ -430,21 +514,41 @@ private:
         }
         if (!tech_pvt->inject_buffer) {
             push_err(out, m_sessionId, "processMessage - inject_buffer not initialized");
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
+                              "(%s) processMessage - inject_buffer not initialized\n", m_sessionId.c_str());
             return out;
         }
 
         // Optional: enforce sample rate match to avoid expensive resampling in this fast path.
         // We accept only PCM16 at the session sampling rate.
         if (tech_pvt->inject_sample_rate > 0 && sampleRate != tech_pvt->inject_sample_rate) {
-            push_err(out, m_sessionId, "processMessage - sampleRate mismatch (got " + std::to_string(sampleRate) +
-                                       ", expected " + std::to_string(tech_pvt->inject_sample_rate) + ")");
-            return out;
+            // If we have a resampler available we reject mismatched sample rates here to
+            // avoid expensive on-the-fly decoding. If no resampler is present (SpeexDSP
+            // missing) we can accept the native sampling rate and adjust the inject
+            // sample rate to match incoming data — this preserves functionality when
+            // running without Speex support (best-effort).
+            if (tech_pvt->resampler) {
+                push_err(out, m_sessionId, "processMessage - sampleRate mismatch (got " + std::to_string(sampleRate) +
+                                           ", expected " + std::to_string(tech_pvt->inject_sample_rate) + ")");
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
+                                  "(%s) processMessage - sampleRate mismatch got=%d expected=%d\n",
+                                  m_sessionId.c_str(), sampleRate, tech_pvt->inject_sample_rate);
+                return out;
+            } else {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
+                                  "(%s) processMessage: no resampler available — accepting native sampleRate=%d and adjusting inject_sample_rate\n",
+                                  m_sessionId.c_str(), sampleRate);
+                tech_pvt->inject_sample_rate = sampleRate;
+            }
         }
 
         // Bound buffer growth: keep at most N ms of audio.
         const int channels = 1; // injection currently mono
         const size_t max_bytes = pcm16_bytes_per_ms(tech_pvt->inject_sample_rate, channels) * (size_t)INJECT_BUFFER_MS_DEFAULT;
-        const switch_size_t inuse = tech_pvt->inject_buffer ? switch_buffer_inuse(tech_pvt->inject_buffer) : 0;
+
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
+                          "(%s) processMessage: inject_sample_rate=%d max_bytes=%zu\n",
+                          m_sessionId.c_str(), tech_pvt->inject_sample_rate, max_bytes);
 
         switch_mutex_lock(tech_pvt->mutex);
 
@@ -454,11 +558,19 @@ private:
             if ((size_t)inuse_locked + incoming > max_bytes) {
                 const size_t over = ((size_t)inuse_locked + incoming) - max_bytes;
                 drop_oldest_from_buffer(tech_pvt->inject_buffer, (switch_size_t)over);
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
+                                  "(%s) processMessage: inject buffer overflow, dropped %zu bytes\n",
+                                  m_sessionId.c_str(), over);
             }
         }
 
         switch_buffer_write(tech_pvt->inject_buffer, decoded.data(), (switch_size_t)decoded.size());
+    const switch_size_t inuse_after = switch_buffer_inuse(tech_pvt->inject_buffer);
         switch_mutex_unlock(tech_pvt->mutex);
+
+    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
+              "(%s) PUSHBACK queued: decoded_bytes=%zu sampleRate=%d inject_inuse_after=%u\n",
+              m_sessionId.c_str(), decoded.size(), sampleRate, (unsigned)inuse_after);
 
         // Return a small ack payload (optional) so that upstream can correlate.
         cJSON_AddNumberToObject(jsonData, "bytes", (double)decoded.size());
@@ -516,6 +628,11 @@ namespace {
         int err; //speex
 
         switch_memory_pool_t *pool = switch_core_session_get_pool(session);
+
+        /* Informational build/version log so runtime can confirm this compiled module is active. */
+        const char* _uuid_log = switch_core_session_get_uuid(session);
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                          "(%s) mod_audio_stream build version 1.0.1 running\n", _uuid_log);
 
         memset(tech_pvt, 0, sizeof(private_t));
 
