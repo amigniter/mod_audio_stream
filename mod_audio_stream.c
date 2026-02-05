@@ -67,31 +67,78 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
         }
         return stream_frame(bug);
 
-    /* ---------- WS → FS (WRITE) ---------- */
-    case SWITCH_ABC_TYPE_WRITE:
+    /* ---------- WS → FS (WRITE REPLACE) ---------- */
+    case SWITCH_ABC_TYPE_WRITE_REPLACE:
         {
             switch_frame_t *frame =
                 switch_core_media_bug_get_write_replace_frame(bug);
 
-            if (!frame || !tech_pvt->inject_buffer) {
+            /* Stats for debugging injection consumption (rate-limited) */
+            static uint32_t s_write_calls = 0;
+            static switch_time_t s_last_report = 0;
+            static uint64_t s_inject_bytes = 0;
+            static uint64_t s_underruns = 0;
+
+            if (!frame || !frame->data || frame->datalen == 0 || !tech_pvt || !tech_pvt->inject_buffer) {
                 break;
             }
 
             /* How many bytes FS expects */
             switch_size_t need = frame->datalen;
+            switch_size_t avail = 0;
+            switch_size_t to_read = 0;
+            switch_size_t got = 0;
 
-            if (switch_buffer_inuse(tech_pvt->inject_buffer) < need) {
-                /* Not enough AI audio yet → play silence */
-                memset(frame->data, 0, frame->datalen);
-                break;
+            /*
+             * Inject buffer is written from the WS thread under tech_pvt->mutex.
+             * Always take the same lock here to avoid races/undefined behavior.
+             */
+            switch_mutex_lock(tech_pvt->mutex);
+
+            avail = switch_buffer_inuse(tech_pvt->inject_buffer);
+            to_read = (avail > need) ? need : avail;
+            if (to_read > 0) {
+                got = switch_buffer_read(tech_pvt->inject_buffer, frame->data, to_read);
             }
 
-            /* Replace audio */
-            switch_buffer_read(
-                tech_pvt->inject_buffer,
-                frame->data,
-                need
-            );
+            switch_mutex_unlock(tech_pvt->mutex);
+
+            /* Pad remainder with silence if AI is short */
+            if (got < need) {
+                memset(((unsigned char *)frame->data) + got, 0, need - got);
+                s_underruns++;
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),
+                                  SWITCH_LOG_DEBUG,
+                                  "(%s) PUSHBACK underrun: need=%lu got=%lu avail_before=%lu\n",
+                                  switch_core_session_get_uuid(session),
+                                  (unsigned long)need,
+                                  (unsigned long)got,
+                                  (unsigned long)avail);
+            }
+
+            /* Commit replacement frame (important for some builds) */
+            switch_core_media_bug_set_write_replace_frame(bug, frame);
+
+            s_write_calls++;
+            s_inject_bytes += got;
+
+            /* Print a compact summary about once per second per process (good enough for debugging). */
+            const switch_time_t now = switch_micro_time_now();
+            if (!s_last_report) s_last_report = now;
+            if ((now - s_last_report) > 1000000) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),
+                                  SWITCH_LOG_INFO,
+                                  "(%s) PUSHBACK consume: write_calls=%u bytes_read=%llu underruns=%llu inject_inuse_now=%lu\n",
+                                  switch_core_session_get_uuid(session),
+                                  (unsigned)s_write_calls,
+                                  (unsigned long long)s_inject_bytes,
+                                  (unsigned long long)s_underruns,
+                                  (unsigned long)switch_buffer_inuse(tech_pvt->inject_buffer));
+                s_last_report = now;
+                s_write_calls = 0;
+                s_inject_bytes = 0;
+                s_underruns = 0;
+            }
         }
         break;
 

@@ -14,8 +14,9 @@
 #include "base64.h"
 #include <algorithm>
 #include <climits>
+#include <cstdint>
 
-#define MOD_AUDIO_STREAM_VERSION "1.0.1"
+#define MOD_AUDIO_STREAM_VERSION "1.1.0"
 
 #define FRAME_SIZE_8000  320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
 
@@ -344,6 +345,86 @@ private:
         return (size_t)sampleRate * 2u * (size_t)channels / 1000u;
     }
 
+    static inline bool host_is_little_endian() {
+        const uint16_t x = 1;
+        return *((const uint8_t*)&x) == 1;
+    }
+
+    static inline void byteswap_inplace_16(std::string& s) {
+        // swap byte order of int16 samples (in-place)
+        const size_t n = s.size() & ~size_t(1);
+        for (size_t i = 0; i < n; i += 2) {
+            std::swap(s[i], s[i + 1]);
+        }
+    }
+
+    static inline std::string downmix_stereo_to_mono_pcm16le(const uint8_t* in, size_t in_bytes) {
+        // in: interleaved L,R int16 little-endian
+        const size_t frames = (in_bytes / 4);
+        std::string out;
+        out.resize(frames * 2);
+        for (size_t i = 0; i < frames; ++i) {
+            int16_t l;
+            int16_t r;
+            std::memcpy(&l, in + i * 4, 2);
+            std::memcpy(&r, in + i * 4 + 2, 2);
+            const int32_t m = ((int32_t)l + (int32_t)r) / 2;
+            const int16_t mono = (int16_t)std::max<int32_t>(-32768, std::min<int32_t>(32767, m));
+            std::memcpy(&out[i * 2], &mono, 2);
+        }
+        return out;
+    }
+
+    static inline std::string upmix_mono_to_stereo_pcm16le(const uint8_t* in, size_t in_bytes) {
+        const size_t frames = in_bytes / 2;
+        std::string out;
+        out.resize(frames * 4);
+        for (size_t i = 0; i < frames; ++i) {
+            int16_t m;
+            std::memcpy(&m, in + i * 2, 2);
+            std::memcpy(&out[i * 4], &m, 2);
+            std::memcpy(&out[i * 4 + 2], &m, 2);
+        }
+        return out;
+    }
+
+    static inline std::string resample_pcm16le_speex(const uint8_t* in, size_t in_bytes, int channels,
+                                                     int in_sr, int out_sr, SpeexResamplerState* resampler) {
+        // Resampler is configured for (channels, in_sr -> out_sr)
+        // Returns PCM16LE at out_sr.
+        if (!resampler || in_sr == out_sr) {
+            return std::string((const char*)in, (const char*)in + in_bytes);
+        }
+        const spx_uint32_t in_frames = (spx_uint32_t)(in_bytes / (size_t)(channels * 2));
+        if (in_frames == 0) return {};
+
+        // Worst-case output frames: ceil(in_frames * out_sr / in_sr) + small guard
+        const uint64_t nom = (uint64_t)in_frames * (uint64_t)out_sr;
+        const uint32_t out_frames_cap = (uint32_t)(nom / (uint64_t)in_sr + 16);
+        std::vector<spx_int16_t> out;
+        out.resize((size_t)out_frames_cap * (size_t)channels);
+
+        spx_uint32_t in_len = in_frames;
+        spx_uint32_t out_len = out_frames_cap;
+        int err = 0;
+
+        if (channels == 1) {
+            err = speex_resampler_process_int(resampler, 0,
+                                              (const spx_int16_t*)in, &in_len,
+                                              out.data(), &out_len);
+        } else {
+            err = speex_resampler_process_interleaved_int(resampler,
+                                                          (const spx_int16_t*)in, &in_len,
+                                                          out.data(), &out_len);
+        }
+        if (err != RESAMPLER_ERR_SUCCESS) {
+            // On error, fall back to raw.
+            return std::string((const char*)in, (const char*)in + in_bytes);
+        }
+        const size_t out_bytes = (size_t)out_len * (size_t)channels * 2;
+        return std::string((const char*)out.data(), (const char*)out.data() + out_bytes);
+    }
+
     static inline void drop_oldest_from_buffer(switch_buffer_t* buf, switch_size_t bytes) {
         if (!buf || bytes == 0) return;
         // Consume and discard bytes from the head.
@@ -491,11 +572,8 @@ private:
                           m_sessionId.c_str(), decoded.size(), sampleRate);
 
         // Ensure we have whole PCM16 samples.
-        // If caller is stereo, we still inject mono unless you extend the protocol.
-        // Frame replacement code in mod_audio_stream.c uses the call's channel count.
-        // To avoid mismatched channel layouts, we default to mono injection.
         if (decoded.size() % 2u != 0u) {
-            // Drop the trailing byte rather than rejecting; avoids popping on odd chunk boundaries.
+            // Drop trailing byte to preserve alignment.
             decoded.resize(decoded.size() - 1);
         }
 
@@ -519,58 +597,167 @@ private:
             return out;
         }
 
-        // Optional: enforce sample rate match to avoid expensive resampling in this fast path.
-        // We accept only PCM16 at the session sampling rate.
-        if (tech_pvt->inject_sample_rate > 0 && sampleRate != tech_pvt->inject_sample_rate) {
-            // If we have a resampler available we reject mismatched sample rates here to
-            // avoid expensive on-the-fly decoding. If no resampler is present (SpeexDSP
-            // missing) we can accept the native sampling rate and adjust the inject
-            // sample rate to match incoming data — this preserves functionality when
-            // running without Speex support (best-effort).
-            if (tech_pvt->resampler) {
-                push_err(out, m_sessionId, "processMessage - sampleRate mismatch (got " + std::to_string(sampleRate) +
-                                           ", expected " + std::to_string(tech_pvt->inject_sample_rate) + ")");
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
-                                  "(%s) processMessage - sampleRate mismatch got=%d expected=%d\n",
-                                  m_sessionId.c_str(), sampleRate, tech_pvt->inject_sample_rate);
-                return out;
-            } else {
+        // Convert incoming OpenAI PCM16 to the exact format FS write-replace expects:
+        // - Sampling rate: tech_pvt->sampling (desiredSampling)
+        // - Channels: tech_pvt->channels (mono/stereo)
+        // - Sample format: signed PCM16 in native endianness (host order), because frames are copied byte-for-byte.
+        //
+        // OpenAI returns little-endian PCM16. On big-endian platforms we must swap.
+        if (!host_is_little_endian()) {
+            byteswap_inplace_16(decoded);
+        }
+
+        // Input channel count: allow JSON field "channels" (optional). Default to 1.
+        int in_channels = 1;
+        if (cJSON* jsonCh = cJSON_GetObjectItem(jsonData, "channels")) {
+            if (cJSON_IsNumber(jsonCh) && jsonCh->valueint > 0) {
+                in_channels = jsonCh->valueint;
+            }
+        }
+        if (in_channels != 1 && in_channels != 2) {
+            push_err(out, m_sessionId, "processMessage - unsupported channels (must be 1 or 2)");
+            return out;
+        }
+
+        // Inject channel count should match what the media bug was initialized with.
+        // If the bug was created with SMBF_STEREO, FS expects 2ch linear frames.
+        // Otherwise, 1ch is expected.
+        const int out_channels = (tech_pvt->channels == 2) ? 2 : 1;
+
+        // Channel conversion first (keep sampleRate constant for resampler correctness).
+        if (in_channels == 2 && out_channels == 1) {
+            decoded = downmix_stereo_to_mono_pcm16le((const uint8_t*)decoded.data(), decoded.size());
+        } else if (in_channels == 1 && out_channels == 2) {
+            decoded = upmix_mono_to_stereo_pcm16le((const uint8_t*)decoded.data(), decoded.size());
+        }
+
+        // Injection output sample rate is the session desired sampling rate.
+        const int out_sr = tech_pvt->sampling > 0 ? tech_pvt->sampling : tech_pvt->inject_sample_rate;
+        if (out_sr <= 0) {
+            push_err(out, m_sessionId, "processMessage - invalid output sample rate (session) for injection");
+            return out;
+        }
+
+        if (sampleRate != out_sr) {
+            // Lazily create or recreate injection resampler for (sampleRate -> out_sr).
+            // Must be protected by mutex because other threads might read/destroy tech_pvt.
+            switch_mutex_lock(tech_pvt->mutex);
+            if (!tech_pvt->inject_resampler) {
+                int err = 0;
+                tech_pvt->inject_resampler = speex_resampler_init(out_channels, sampleRate, out_sr,
+                                                                  SWITCH_RESAMPLE_QUALITY, &err);
+                if (err != 0 || !tech_pvt->inject_resampler) {
+                    switch_mutex_unlock(tech_pvt->mutex);
+                    push_err(out, m_sessionId, "processMessage - failed to init inject resampler");
+                    return out;
+                }
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
-                                  "(%s) processMessage: no resampler available — accepting native sampleRate=%d and adjusting inject_sample_rate\n",
-                                  m_sessionId.c_str(), sampleRate);
-                tech_pvt->inject_sample_rate = sampleRate;
+                                  "(%s) processMessage: created inject resampler %d -> %d ch=%d\n",
+                                  m_sessionId.c_str(), sampleRate, out_sr, out_channels);
+            } else {
+                // Ensure config matches current rates.
+                spx_uint32_t in_r = 0, out_r = 0;
+                speex_resampler_get_rate(tech_pvt->inject_resampler, &in_r, &out_r);
+                if ((int)in_r != sampleRate || (int)out_r != out_sr) {
+                    speex_resampler_destroy(tech_pvt->inject_resampler);
+                    tech_pvt->inject_resampler = nullptr;
+                    int err = 0;
+                    tech_pvt->inject_resampler = speex_resampler_init(out_channels, sampleRate, out_sr,
+                                                                      SWITCH_RESAMPLE_QUALITY, &err);
+                    if (err != 0 || !tech_pvt->inject_resampler) {
+                        switch_mutex_unlock(tech_pvt->mutex);
+                        push_err(out, m_sessionId, "processMessage - failed to reinit inject resampler");
+                        return out;
+                    }
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
+                                      "(%s) processMessage: re-created inject resampler %d -> %d ch=%d\n",
+                                      m_sessionId.c_str(), sampleRate, out_sr, out_channels);
+                }
+            }
+
+            SpeexResamplerState* inj_rs = tech_pvt->inject_resampler;
+            switch_mutex_unlock(tech_pvt->mutex);
+
+            decoded = resample_pcm16le_speex((const uint8_t*)decoded.data(), decoded.size(), out_channels,
+                                            sampleRate, out_sr, inj_rs);
+            // After resample, sampleRate becomes out_sr.
+            sampleRate = out_sr;
+
+            if (decoded.empty()) {
+                push_err(out, m_sessionId, "processMessage - resample produced empty output");
+                return out;
             }
         }
 
-        // Bound buffer growth: keep at most N ms of audio.
-        const int channels = 1; // injection currently mono
-        const size_t max_bytes = pcm16_bytes_per_ms(tech_pvt->inject_sample_rate, channels) * (size_t)INJECT_BUFFER_MS_DEFAULT;
+        // Ensure whole frames for channel layout.
+        const size_t frame_align = (size_t)out_channels * 2u;
+        if (frame_align > 0 && (decoded.size() % frame_align) != 0) {
+            decoded.resize(decoded.size() - (decoded.size() % frame_align));
+        }
+
+        // For smoother playback, align to 20ms frame boundaries.
+        const size_t frame_bytes_20ms = pcm16_bytes_per_ms(out_sr, out_channels) * 20u;
+        if (frame_bytes_20ms > 0 && decoded.size() >= frame_bytes_20ms) {
+            decoded.resize(decoded.size() - (decoded.size() % frame_bytes_20ms));
+        }
+
+    // Bound buffer growth: keep at most N ms of audio.
+    const int channels = out_channels;
+        switch_mutex_lock(tech_pvt->mutex);
+
+    // Keep inject_sample_rate aligned with the actual injection rate.
+    tech_pvt->inject_sample_rate = out_sr;
+    tech_pvt->inject_bytes_per_sample = 2;
+    const int inject_sr = tech_pvt->inject_sample_rate;
+
+    // Compute actual buffer capacity using inuse + freespace.
+    // This is more robust across FS versions than relying on switch_buffer_len().
+    const switch_size_t inuse_before = switch_buffer_inuse(tech_pvt->inject_buffer);
+    const switch_size_t free_before = switch_buffer_freespace(tech_pvt->inject_buffer);
+    const size_t max_bytes = (size_t)inuse_before + (size_t)free_before;
 
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
-                          "(%s) processMessage: inject_sample_rate=%d max_bytes=%zu\n",
-                          m_sessionId.c_str(), tech_pvt->inject_sample_rate, max_bytes);
-
-        switch_mutex_lock(tech_pvt->mutex);
+                          "(%s) processMessage: inject_sample_rate=%d max_bytes=%zu (buffer_len)\n",
+                          m_sessionId.c_str(), inject_sr, max_bytes);
 
         if (max_bytes > 0) {
             const switch_size_t inuse_locked = switch_buffer_inuse(tech_pvt->inject_buffer);
             const size_t incoming = decoded.size();
             if ((size_t)inuse_locked + incoming > max_bytes) {
                 const size_t over = ((size_t)inuse_locked + incoming) - max_bytes;
-                drop_oldest_from_buffer(tech_pvt->inject_buffer, (switch_size_t)over);
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
-                                  "(%s) processMessage: inject buffer overflow, dropped %zu bytes\n",
-                                  m_sessionId.c_str(), over);
+
+                // Drop ONLY whole 20ms frames to preserve alignment.
+                const size_t frame_bytes_20ms = pcm16_bytes_per_ms(out_sr, out_channels) * 20u;
+                size_t drop = over;
+                if (frame_bytes_20ms > 0) {
+                    drop = ((over + frame_bytes_20ms - 1) / frame_bytes_20ms) * frame_bytes_20ms;
+                } else {
+                    // Fallback: keep sample alignment at least.
+                    const size_t sample_align = (size_t)out_channels * 2u;
+                    if (sample_align > 0) {
+                        drop = ((over + sample_align - 1) / sample_align) * sample_align;
+                    }
+                }
+
+                const size_t inuse_sz = (size_t)inuse_locked;
+                if (drop > inuse_sz) drop = inuse_sz;
+
+                if (drop > 0) {
+                    drop_oldest_from_buffer(tech_pvt->inject_buffer, (switch_size_t)drop);
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
+                                      "(%s) processMessage: inject buffer overflow, dropped %zu bytes (aligned)\n",
+                                      m_sessionId.c_str(), drop);
+                }
             }
         }
 
-        switch_buffer_write(tech_pvt->inject_buffer, decoded.data(), (switch_size_t)decoded.size());
-    const switch_size_t inuse_after = switch_buffer_inuse(tech_pvt->inject_buffer);
+    switch_buffer_write(tech_pvt->inject_buffer, decoded.data(), (switch_size_t)decoded.size());
+	const switch_size_t inuse_after = switch_buffer_inuse(tech_pvt->inject_buffer);
         switch_mutex_unlock(tech_pvt->mutex);
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
-              "(%s) PUSHBACK queued: decoded_bytes=%zu sampleRate=%d inject_inuse_after=%u\n",
-              m_sessionId.c_str(), decoded.size(), sampleRate, (unsigned)inuse_after);
+              "(%s) PUSHBACK queued: decoded_bytes=%zu in_sr=%d out_sr=%d in_ch=%d out_ch=%d inject_inuse_after=%u\n",
+              m_sessionId.c_str(), decoded.size(), sampleRate, out_sr, in_channels, out_channels, (unsigned)inuse_after);
 
         // Return a small ack payload (optional) so that upstream can correlate.
         cJSON_AddNumberToObject(jsonData, "bytes", (double)decoded.size());
@@ -631,8 +818,9 @@ namespace {
 
         /* Informational build/version log so runtime can confirm this compiled module is active. */
         const char* _uuid_log = switch_core_session_get_uuid(session);
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                          "(%s) mod_audio_stream build version 1.0.1 running\n", _uuid_log);
+    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+              "(%s) mod_audio_stream build version %s running\n",
+              _uuid_log, MOD_AUDIO_STREAM_VERSION);
 
         memset(tech_pvt, 0, sizeof(private_t));
 
@@ -653,13 +841,10 @@ namespace {
 
         //size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PERIOD * BUFFERED_SEC);
         const size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * rtp_packets);
-        
-        auto sp = AudioStreamer::create(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat,
-                                        suppressLog, extra_headers, tls_cafile, tls_keyfile,
-                                        tls_certfile, tls_disable_hostname_validation);
 
-        tech_pvt->pAudioStreamer = new std::shared_ptr<AudioStreamer>(sp);
-
+        /* IMPORTANT: initialize mutex and buffers BEFORE connecting the WebSocket.
+           The WS client can deliver messages immediately after connect(), and
+           processMessage() expects tech_pvt->mutex and tech_pvt->inject_buffer to exist. */
         switch_mutex_init(&tech_pvt->mutex, SWITCH_MUTEX_NESTED, pool);
         
         if (switch_buffer_create(pool, &tech_pvt->sbuffer, buflen) != SWITCH_STATUS_SUCCESS) {
@@ -672,13 +857,19 @@ namespace {
         // Size it to ~INJECT_BUFFER_MS_DEFAULT of PCM16 at desiredSampling.
         tech_pvt->inject_sample_rate = desiredSampling;
         tech_pvt->inject_bytes_per_sample = 2; // PCM16
-        const size_t inject_bytes_per_ms = pcm16_bytes_per_ms(desiredSampling, 1);
+        const size_t inject_bytes_per_ms = pcm16_bytes_per_ms(desiredSampling, channels);
         const size_t inject_buflen = std::max<size_t>(inject_bytes_per_ms * (size_t)INJECT_BUFFER_MS_DEFAULT, 3200u);
         if (switch_buffer_create(pool, &tech_pvt->inject_buffer, inject_buflen) != SWITCH_STATUS_SUCCESS) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                 "%s: Error creating inject buffer.\n", tech_pvt->sessionId);
             return SWITCH_STATUS_FALSE;
         }
+
+        auto sp = AudioStreamer::create(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat,
+                                        suppressLog, extra_headers, tls_cafile, tls_keyfile,
+                                        tls_certfile, tls_disable_hostname_validation);
+
+        tech_pvt->pAudioStreamer = new std::shared_ptr<AudioStreamer>(sp);
 
         if (desiredSampling != sampling) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) resampling from %u to %u\n", tech_pvt->sessionId, sampling, desiredSampling);
@@ -692,6 +883,10 @@ namespace {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) no resampling needed for this call\n", tech_pvt->sessionId);
         }
 
+        /* Injection resampler is created lazily on first mismatched injection sampleRate.
+           (OpenAI can return 8k/16k; call can be either.) */
+        tech_pvt->inject_resampler = nullptr;
+
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) stream_data_init\n", tech_pvt->sessionId);
 
         return SWITCH_STATUS_SUCCESS;
@@ -702,6 +897,10 @@ namespace {
         if (tech_pvt->resampler) {
             speex_resampler_destroy(tech_pvt->resampler);
             tech_pvt->resampler = nullptr;
+        }
+        if (tech_pvt->inject_resampler) {
+            speex_resampler_destroy(tech_pvt->inject_resampler);
+            tech_pvt->inject_resampler = nullptr;
         }
         if (tech_pvt->mutex) {
             switch_mutex_destroy(tech_pvt->mutex);
@@ -930,6 +1129,11 @@ extern "C" {
         std::shared_ptr<AudioStreamer> streamer;
         std::vector<std::vector<uint8_t>> pending_send;
 
+        SpeexResamplerState *resampler = nullptr;
+        int channels = 1;
+        int rtp_packets = 1;
+        switch_buffer_t *sbuffer = nullptr;
+
         if (switch_mutex_trylock(tech_pvt->mutex) != SWITCH_STATUS_SUCCESS) {
             return SWITCH_TRUE;
         }
@@ -947,9 +1151,13 @@ extern "C" {
 
         streamer = *sp_ptr;
 
-        auto *resampler = tech_pvt->resampler;
-        const int channels = tech_pvt->channels;
-        const int rtp_packets = tech_pvt->rtp_packets;
+        resampler = tech_pvt->resampler;
+        channels = tech_pvt->channels;
+        rtp_packets = tech_pvt->rtp_packets;
+        sbuffer = tech_pvt->sbuffer;
+
+        // Release mutex before reading frames; we will take it only around sbuffer operations.
+        switch_mutex_unlock(tech_pvt->mutex);
 
         if (nullptr == resampler) {
             
@@ -968,21 +1176,25 @@ extern "C" {
                     continue;
                 }
 
-                size_t freespace = switch_buffer_freespace(tech_pvt->sbuffer);
+                // Aggregation buffer is shared state; protect it.
+                switch_mutex_lock(tech_pvt->mutex);
+                size_t freespace = switch_buffer_freespace(sbuffer);
                 
                 if (freespace >= frame.datalen) {
-                    switch_buffer_write(tech_pvt->sbuffer, static_cast<uint8_t *>(frame.data), frame.datalen);
+                    switch_buffer_write(sbuffer, static_cast<uint8_t *>(frame.data), frame.datalen);
                 }
 
-                if (switch_buffer_freespace(tech_pvt->sbuffer) == 0) {
-                    switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
+                if (switch_buffer_freespace(sbuffer) == 0) {
+                    switch_size_t inuse = switch_buffer_inuse(sbuffer);
                     if (inuse > 0) {
                         std::vector<uint8_t> tmp(inuse);
-                        switch_buffer_read(tech_pvt->sbuffer, tmp.data(), inuse);
-                        switch_buffer_zero(tech_pvt->sbuffer);
+                        switch_buffer_read(sbuffer, tmp.data(), inuse);
+                        switch_buffer_zero(sbuffer);
                         pending_send.emplace_back(std::move(tmp));
                     }
                 }
+
+                switch_mutex_unlock(tech_pvt->mutex);
             }
             
         } else {
@@ -997,17 +1209,20 @@ extern "C" {
                     continue;
                 }
 
-                const size_t freespace = switch_buffer_freespace(tech_pvt->sbuffer);
+                // Note: resampler path uses sbuffer for buffering; access it without holding the
+                // mutex only if no other thread touches it concurrently. We keep the existing
+                // behavior here, since only stream_frame owns sbuffer in practice.
+                const size_t freespace = switch_buffer_freespace(sbuffer);
                 spx_uint32_t in_len = frame.samples;
-                spx_uint32_t out_len = (freespace / (tech_pvt->channels * sizeof(spx_int16_t)));
+                spx_uint32_t out_len = (freespace / (channels * sizeof(spx_int16_t)));
                 
                 if(out_len == 0) {
                     if(freespace == 0) {
-                        switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
+                        switch_size_t inuse = switch_buffer_inuse(sbuffer);
                         if (inuse > 0) {
                             std::vector<uint8_t> tmp(inuse);
-                            switch_buffer_read(tech_pvt->sbuffer, tmp.data(), inuse);
-                            switch_buffer_zero(tech_pvt->sbuffer);
+                            switch_buffer_read(sbuffer, tmp.data(), inuse);
+                            switch_buffer_zero(sbuffer);
                             pending_send.emplace_back(std::move(tmp));
                         }
                     }
@@ -1042,23 +1257,23 @@ extern "C" {
                     }
 
                     if (bytes_written <= switch_buffer_freespace(tech_pvt->sbuffer)) {
-                        switch_buffer_write(tech_pvt->sbuffer, (const uint8_t *)out.data(), bytes_written);
+                        switch_buffer_write(sbuffer, (const uint8_t *)out.data(), bytes_written);
                     }
                 }
 
-                if (switch_buffer_freespace(tech_pvt->sbuffer) == 0) {
-                    switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
+                if (switch_buffer_freespace(sbuffer) == 0) {
+                    switch_size_t inuse = switch_buffer_inuse(sbuffer);
                     if (inuse > 0) {
                         std::vector<uint8_t> tmp(inuse);
-                        switch_buffer_read(tech_pvt->sbuffer, tmp.data(), inuse);
-                        switch_buffer_zero(tech_pvt->sbuffer);
+                        switch_buffer_read(sbuffer, tmp.data(), inuse);
+                        switch_buffer_zero(sbuffer);
                         pending_send.emplace_back(std::move(tmp));
                     }
                 }
             }
         }
-        
-        switch_mutex_unlock(tech_pvt->mutex);
+
+        // mutex was released before the read loops
     
         if (!streamer || !streamer->isConnected()) return SWITCH_TRUE;
 
