@@ -59,11 +59,6 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
             switch_frame_t *frame =
                 switch_core_media_bug_get_write_replace_frame(bug);
 
-            static uint32_t s_write_calls = 0;
-            static switch_time_t s_last_report = 0;
-            static uint64_t s_inject_bytes = 0;
-            static uint64_t s_underruns = 0;
-
             if (!frame || !frame->data || frame->datalen == 0 || !tech_pvt || !tech_pvt->inject_buffer) {
                 break;
             }
@@ -73,19 +68,26 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
             switch_size_t to_read = 0;
             switch_size_t got = 0;
 
+            /* Read injected audio into a temporary buffer so we can MIX it with the
+               current outbound audio (instead of replacing with silence on underrun). */
+            uint8_t *inj = (uint8_t *)switch_core_session_alloc(session, need);
+            if (!inj) {
+                break;
+            }
+            memset(inj, 0, need);
+
             switch_mutex_lock(tech_pvt->mutex);
 
             avail = switch_buffer_inuse(tech_pvt->inject_buffer);
             to_read = (avail > need) ? need : avail;
             if (to_read > 0) {
-                got = switch_buffer_read(tech_pvt->inject_buffer, frame->data, to_read);
+                got = switch_buffer_read(tech_pvt->inject_buffer, inj, to_read);
             }
 
             switch_mutex_unlock(tech_pvt->mutex);
 
             if (got < need) {
-                memset(((unsigned char *)frame->data) + got, 0, need - got);
-                s_underruns++;
+                tech_pvt->inject_underruns++;
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),
                                   SWITCH_LOG_DEBUG,
                                   "(%s) PUSHBACK underrun: need=%lu got=%lu avail_before=%lu\n",
@@ -95,26 +97,44 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
                                   (unsigned long)avail);
             }
 
+            /* Mix PCM16LE samples with saturation.
+               NOTE: This assumes the bug write frame is PCM16, which matches this module's
+               injection format and typical FS linear audio frames. */
+            {
+                int16_t *dst = (int16_t *)frame->data;
+                const int16_t *src = (const int16_t *)inj;
+                const switch_size_t samples = need / 2;
+                for (switch_size_t i = 0; i < samples; ++i) {
+                    int32_t v = (int32_t)dst[i] + (int32_t)src[i];
+                    if (v > 32767) v = 32767;
+                    else if (v < -32768) v = -32768;
+                    dst[i] = (int16_t)v;
+                }
+            }
+
             switch_core_media_bug_set_write_replace_frame(bug, frame);
 
-            s_write_calls++;
-            s_inject_bytes += got;
+            tech_pvt->inject_write_calls++;
+            tech_pvt->inject_bytes += got;
 
             const switch_time_t now = switch_micro_time_now();
-            if (!s_last_report) s_last_report = now;
-            if ((now - s_last_report) > 1000000) {
+            if (!tech_pvt->inject_last_report) tech_pvt->inject_last_report = now;
+            if ((now - tech_pvt->inject_last_report) > 1000000) {
+                const double loss_pct = tech_pvt->inject_write_calls ?
+                    (100.0 * (double)tech_pvt->inject_underruns / (double)tech_pvt->inject_write_calls) : 0.0;
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),
                                   SWITCH_LOG_INFO,
-                                  "(%s) PUSHBACK consume: write_calls=%u bytes_read=%llu underruns=%llu inject_inuse_now=%lu\n",
+                                  "(%s) PUSHBACK consume: write_calls=%llu bytes_read=%llu underruns=%llu loss%%=%.1f inject_inuse_now=%lu\n",
                                   switch_core_session_get_uuid(session),
-                                  (unsigned)s_write_calls,
-                                  (unsigned long long)s_inject_bytes,
-                                  (unsigned long long)s_underruns,
+                                  (unsigned long long)tech_pvt->inject_write_calls,
+                                  (unsigned long long)tech_pvt->inject_bytes,
+                                  (unsigned long long)tech_pvt->inject_underruns,
+                                  loss_pct,
                                   (unsigned long)switch_buffer_inuse(tech_pvt->inject_buffer));
-                s_last_report = now;
-                s_write_calls = 0;
-                s_inject_bytes = 0;
-                s_underruns = 0;
+                tech_pvt->inject_last_report = now;
+                tech_pvt->inject_write_calls = 0;
+                tech_pvt->inject_bytes = 0;
+                tech_pvt->inject_underruns = 0;
             }
         }
         break;

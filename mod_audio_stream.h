@@ -50,6 +50,12 @@ struct private_data {
     switch_buffer_t *inject_buffer;
     int inject_sample_rate;     
     int inject_bytes_per_sample;
+
+    /* pushback stats (per session) */
+    uint64_t inject_write_calls;
+    uint64_t inject_bytes;
+    uint64_t inject_underruns;
+    switch_time_t inject_last_report;
 };
 
 typedef struct private_data private_t;

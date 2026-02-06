@@ -625,11 +625,12 @@ private:
                 }
             }
 
-            SpeexResamplerState* inj_rs = tech_pvt->inject_resampler;
-            switch_mutex_unlock(tech_pvt->mutex);
-
+            /* IMPORTANT: keep the mutex held while using inject_resampler to avoid a
+               use-after-free if cleanup destroys it concurrently. */
             decoded = resample_pcm16le_speex((const uint8_t*)decoded.data(), decoded.size(), out_channels,
-                                            sampleRate, out_sr, inj_rs);
+                                            sampleRate, out_sr, tech_pvt->inject_resampler);
+
+            switch_mutex_unlock(tech_pvt->mutex);
         
             sampleRate = out_sr;
 
@@ -767,6 +768,12 @@ namespace {
         tech_pvt->channels = channels;
         tech_pvt->audio_paused = 0;
 
+    /* per-session pushback counters */
+    tech_pvt->inject_write_calls = 0;
+    tech_pvt->inject_bytes = 0;
+    tech_pvt->inject_underruns = 0;
+    tech_pvt->inject_last_report = 0;
+
         if (metadata) {
             strncpy(tech_pvt->initialMetadata, metadata, MAX_METADATA_LEN);
             tech_pvt->initialMetadata[MAX_METADATA_LEN - 1] = '\0';
@@ -828,10 +835,8 @@ namespace {
             speex_resampler_destroy(tech_pvt->inject_resampler);
             tech_pvt->inject_resampler = nullptr;
         }
-        if (tech_pvt->mutex) {
-            switch_mutex_destroy(tech_pvt->mutex);
-            tech_pvt->mutex = nullptr;
-        }
+        /* tech_pvt->mutex comes from the session pool; avoid destroying it explicitly.
+           The pool cleanup will reclaim it safely after all media threads have stopped. */
         tech_pvt->inject_buffer = nullptr;
         tech_pvt->sbuffer = nullptr;
     }
