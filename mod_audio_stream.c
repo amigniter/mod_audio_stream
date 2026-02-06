@@ -1,9 +1,3 @@
-/*
- * mod_audio_stream FreeSWITCH module
- * READ  : FS → WebSocket (AI input)
- * WRITE : WebSocket → PCM → FS (AI output)
- */
-
 #include "mod_audio_stream.h"
 #include "audio_streamer_glue.h"
 
@@ -17,9 +11,6 @@ SWITCH_MODULE_DEFINITION(
     NULL
 );
 
-/* ------------------------------------------------------------------ */
-/* Event bridge                                                        */
-/* ------------------------------------------------------------------ */
 static void responseHandler(switch_core_session_t* session,
                             const char* eventName,
                             const char* json)
@@ -35,9 +26,6 @@ static void responseHandler(switch_core_session_t* session,
     switch_event_fire(&event);
 }
 
-/* ------------------------------------------------------------------ */
-/* Media bug callback                                                  */
-/* ------------------------------------------------------------------ */
 static switch_bool_t capture_callback(switch_media_bug_t *bug,
                                       void *user_data,
                                       switch_abc_type_t type)
@@ -60,20 +48,17 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
         }
         break;
 
-    /* ---------- FS → WS (READ) ---------- */
     case SWITCH_ABC_TYPE_READ:
         if (tech_pvt->close_requested) {
             return SWITCH_FALSE;
         }
         return stream_frame(bug);
 
-    /* ---------- WS → FS (WRITE REPLACE) ---------- */
     case SWITCH_ABC_TYPE_WRITE_REPLACE:
         {
             switch_frame_t *frame =
                 switch_core_media_bug_get_write_replace_frame(bug);
 
-            /* Stats for debugging injection consumption (rate-limited) */
             static uint32_t s_write_calls = 0;
             static switch_time_t s_last_report = 0;
             static uint64_t s_inject_bytes = 0;
@@ -83,16 +68,11 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
                 break;
             }
 
-            /* How many bytes FS expects */
             switch_size_t need = frame->datalen;
             switch_size_t avail = 0;
             switch_size_t to_read = 0;
             switch_size_t got = 0;
 
-            /*
-             * Inject buffer is written from the WS thread under tech_pvt->mutex.
-             * Always take the same lock here to avoid races/undefined behavior.
-             */
             switch_mutex_lock(tech_pvt->mutex);
 
             avail = switch_buffer_inuse(tech_pvt->inject_buffer);
@@ -103,7 +83,6 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
 
             switch_mutex_unlock(tech_pvt->mutex);
 
-            /* Pad remainder with silence if AI is short */
             if (got < need) {
                 memset(((unsigned char *)frame->data) + got, 0, need - got);
                 s_underruns++;
@@ -116,13 +95,11 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
                                   (unsigned long)avail);
             }
 
-            /* Commit replacement frame (important for some builds) */
             switch_core_media_bug_set_write_replace_frame(bug, frame);
 
             s_write_calls++;
             s_inject_bytes += got;
 
-            /* Print a compact summary about once per second per process (good enough for debugging). */
             const switch_time_t now = switch_micro_time_now();
             if (!s_last_report) s_last_report = now;
             if ((now - s_last_report) > 1000000) {
@@ -149,9 +126,6 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
     return SWITCH_TRUE;
 }
 
-/* ------------------------------------------------------------------ */
-/* Start capture                                                       */
-/* ------------------------------------------------------------------ */
 static switch_status_t start_capture(switch_core_session_t *session,
                                      switch_media_bug_flag_t flags,
                                      char* wsUri,
@@ -191,7 +165,6 @@ static switch_status_t start_capture(switch_core_session_t *session,
         return SWITCH_STATUS_FALSE;
     }
 
-    /* Enable READ + WRITE replace */
     flags |= SMBF_READ_STREAM;
     flags |= SMBF_WRITE_REPLACE;
 
@@ -212,9 +185,6 @@ static switch_status_t start_capture(switch_core_session_t *session,
     return SWITCH_STATUS_SUCCESS;
 }
 
-/* ------------------------------------------------------------------ */
-/* Stop / Pause / Resume                                               */
-/* ------------------------------------------------------------------ */
 static switch_status_t do_stop(switch_core_session_t *session, char* text)
 {
     return stream_session_cleanup(session, text, 0);
@@ -230,9 +200,6 @@ static switch_status_t send_text(switch_core_session_t *session, char* text)
     return stream_session_send_text(session, text);
 }
 
-/* ------------------------------------------------------------------ */
-/* API                                                                 */
-/* ------------------------------------------------------------------ */
 #define STREAM_API_SYNTAX \
 "<uuid> start <ws-uri> [mono|mixed|stereo] [8000|16000] [metadata]"
 
@@ -301,9 +268,6 @@ done:
     return SWITCH_STATUS_SUCCESS;
 }
 
-/* ------------------------------------------------------------------ */
-/* Module load / unload                                                */
-/* ------------------------------------------------------------------ */
 SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
 {
     switch_api_interface_t *api_interface;

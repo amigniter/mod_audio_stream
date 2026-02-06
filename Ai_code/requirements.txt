@@ -1,2 +1,0 @@
-websockets>=11.0
-certifi>=2023.7.22

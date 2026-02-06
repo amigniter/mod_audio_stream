@@ -33,9 +33,7 @@ struct private_data {
 
     SpeexResamplerState *resampler;
 
-     /* Dedicated resampler for WS->FS injection path (OpenAI PCM16 -> session rate).
-         This must not reuse 'resampler' which is configured for FS->WS (read) path. */
-     SpeexResamplerState *inject_resampler;
+    SpeexResamplerState *inject_resampler;
 
     responseHandler_t responseHandler;
     void *pAudioStreamer;
