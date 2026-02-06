@@ -37,6 +37,8 @@ class BridgeConfig:
     playout_max_buffer_ms: int
     playout_catchup_max_ms: int
     playout_sleep_granularity_ms: int
+    playout_target_buffer_ms: int
+    playout_max_drain_frames: int
     force_commit_ms: int
     force_response_on_commit: bool
     response_min_interval_ms: int
@@ -46,6 +48,7 @@ class BridgeConfig:
     openai_resample_input: bool
     openai_output_sample_rate: int
     openai_input_mode: str
+    openai_item_max_buffer_ms: int
     wss_pem: str
     openai_wss_insecure: bool
     send_test_tone_on_connect: bool
@@ -82,6 +85,11 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
     playout_catchup_max_ms = _env_int("PLAYOUT_CATCHUP_MAX_MS", 120)
     playout_sleep_granularity_ms = _env_int("PLAYOUT_SLEEP_GRANULARITY_MS", 2)
 
+    # Adaptive playout: keep a steady buffer to smooth bursty output.
+    # Defaults are conservative and can be tuned per deployment.
+    playout_target_buffer_ms = _env_int("PLAYOUT_TARGET_BUFFER_MS", 300)
+    playout_max_drain_frames = _env_int("PLAYOUT_MAX_DRAIN_FRAMES", 2)
+
     force_commit_ms = _env_int("OPENAI_FORCE_COMMIT_MS", 0)
     force_response_on_commit = _env_bool("OPENAI_FORCE_RESPONSE_ON_COMMIT", False)
     response_min_interval_ms = _env_int("RESPONSE_MIN_INTERVAL_MS", 400)
@@ -107,6 +115,9 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
     if openai_input_mode not in ("buffer", "item"):
         raise ValueError("OPENAI_INPUT_MODE must be 'buffer' or 'item'")
 
+    # Item-mode safety: cap how much audio we keep locally while waiting for VAD.
+    openai_item_max_buffer_ms = _env_int("OPENAI_ITEM_MAX_BUFFER_MS", 20000)
+
     wss_pem = os.getenv("WSS_PEM", "").strip().strip('"').strip("'")
     if wss_pem and not os.path.isabs(wss_pem):
         wss_pem = str(Path(wss_pem).expanduser().resolve())
@@ -129,6 +140,8 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
         playout_max_buffer_ms=playout_max_buffer_ms,
         playout_catchup_max_ms=playout_catchup_max_ms,
         playout_sleep_granularity_ms=playout_sleep_granularity_ms,
+    playout_target_buffer_ms=playout_target_buffer_ms,
+    playout_max_drain_frames=playout_max_drain_frames,
         force_commit_ms=force_commit_ms,
         force_response_on_commit=force_response_on_commit,
         response_min_interval_ms=response_min_interval_ms,
@@ -138,6 +151,7 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
         openai_resample_input=openai_resample_input,
         openai_output_sample_rate=openai_output_sample_rate,
         openai_input_mode=openai_input_mode,
+        openai_item_max_buffer_ms=openai_item_max_buffer_ms,
         wss_pem=wss_pem,
         openai_wss_insecure=openai_wss_insecure,
         send_test_tone_on_connect=send_test_tone_on_connect,

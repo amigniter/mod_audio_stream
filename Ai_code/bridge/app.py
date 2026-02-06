@@ -195,6 +195,10 @@ async def pump_openai_to_freeswitch(
 
     buf = bytearray()
 
+    # Precomputed silence frame used when we need to maintain timing but have no audio.
+    # This helps reduce audible clicks/warbles on minor jitter/underruns.
+    silence_frame = b"\x00" * out_frame_bytes
+
     max_buf_bytes = ceil_to_frame(
         frame_bytes(cfg.fs_sample_rate, cfg.fs_channels, max(cfg.playout_max_buffer_ms, cfg.fs_frame_ms)),
         out_frame_bytes,
@@ -232,6 +236,27 @@ async def pump_openai_to_freeswitch(
     # and commit as soon as we cross the threshold. This avoids commit_empty.
     pending_turn_end: Optional[str] = None
 
+    # Item-mode safety: cap how much audio we buffer locally if VAD events are delayed/missed.
+    # Default: 20 seconds (in OpenAI input sample rate, mono PCM16).
+    item_max_buffer_ms = int(getattr(cfg, "openai_item_max_buffer_ms", 20000))
+    item_max_bytes = frame_bytes(openai_in_rate if openai_resample else cfg.fs_sample_rate, 1, item_max_buffer_ms)
+
+    # Adaptive playout targets: keep a steady buffer to smooth bursty OpenAI audio.
+    # This reduces audible choppiness by avoiding the "overflow->drop->underrun" oscillation.
+    target_buf_ms = int(getattr(cfg, "playout_target_buffer_ms", max(0, cfg.playout_prebuffer_ms)))
+    # Allow draining slightly faster when buffer grows too large.
+    max_drain_frames = int(getattr(cfg, "playout_max_drain_frames", 2))
+    if max_drain_frames < 1:
+        max_drain_frames = 1
+    if max_drain_frames > 4:
+        # Keep bounded so we don't create time/pitch artifacts.
+        max_drain_frames = 4
+
+    target_buf_bytes = ceil_to_frame(
+        frame_bytes(cfg.fs_sample_rate, cfg.fs_channels, target_buf_ms),
+        out_frame_bytes,
+    )
+
     async def _send_item_audio_and_respond(reason: str) -> None:
         """Item-based audio input: send one utterance as a conversation item, then create a response."""
         nonlocal response_in_flight
@@ -243,6 +268,20 @@ async def pump_openai_to_freeswitch(
         if not isinstance(audio_buf, (bytearray, bytes)) or len(audio_buf) == 0:
             logger.debug("Item mode: nothing to send for %s", reason)
             return
+
+        if item_max_bytes > 0 and len(audio_buf) > item_max_bytes:
+            # Drop oldest audio, keep the most recent tail. This is safer than unbounded growth.
+            drop = len(audio_buf) - item_max_bytes
+            if isinstance(audio_buf, bytearray):
+                del audio_buf[:drop]
+            else:
+                audio_buf = audio_buf[drop:]
+                setattr(tracker, "item_audio_buf", bytearray(audio_buf))
+            logger.warning(
+                "Item mode buffer capped: dropped_bytes=%d kept_bytes=%d",
+                drop,
+                len(getattr(tracker, "item_audio_buf")),
+            )
 
         # Build item create payload.
         b64_audio = base64.b64encode(bytes(audio_buf)).decode("ascii")
@@ -379,6 +418,10 @@ async def pump_openai_to_freeswitch(
         next_t = time.monotonic() + step_s
         min_sleep = max(cfg.playout_sleep_granularity_ms, 0) / 1000.0
 
+        frames_sent = 0
+        underruns = 0
+        last_stats_t = time.monotonic()
+
         if prebuffer_bytes > 0:
             while len(buf) < prebuffer_bytes:
                 await asyncio.sleep(step_s)
@@ -392,6 +435,9 @@ async def pump_openai_to_freeswitch(
                         sleep_s = min_sleep
                     await asyncio.sleep(sleep_s)
 
+                if time.monotonic() - next_t > step_s * 3:
+                    next_t = time.monotonic() + step_s
+
                 now2 = time.monotonic()
                 lag_s = now2 - next_t
                 if lag_s > max(cfg.playout_catchup_max_ms, 0) / 1000.0:
@@ -402,11 +448,39 @@ async def pump_openai_to_freeswitch(
 
                 next_t += step_s
 
-                if len(buf) >= out_frame_bytes:
-                    frame = bytes(buf[:out_frame_bytes])
-                    del buf[:out_frame_bytes]
+                # Adaptive drain:
+                # - Normally send 1 frame per tick.
+                # - If buffer is much larger than target, send 2 frames (or more, bounded).
+                # This reduces the need to hard-drop old audio when OpenAI arrives in bursts.
+                frames_to_send = 1
+                if target_buf_bytes > 0 and len(buf) > target_buf_bytes + (out_frame_bytes * 6):
+                    extra = (len(buf) - target_buf_bytes) // out_frame_bytes
+                    frames_to_send = min(max_drain_frames, max(2, int(extra)))
+
+                for _ in range(frames_to_send):
+                    if len(buf) >= out_frame_bytes:
+                        frame = bytes(buf[:out_frame_bytes])
+                        del buf[:out_frame_bytes]
+                    else:
+                        # Underrun: send silence to maintain timing.
+                        frame = silence_frame
+                        underruns += 1
+
                     payload = fs_stream_audio_json(frame, contract) if cfg.fs_send_json_audio else frame
                     await upstream_ws.send(payload)
+                    frames_sent += 1
+
+                now_stats = time.monotonic()
+                if now_stats - last_stats_t >= 5.0:
+                    logger.info(
+                        "Playout stats: frames_sent=%d buf_ms=%.1f target_ms=%d underruns=%d drops_capped_by_max=%s",
+                        frames_sent,
+                        (len(buf) / out_frame_bytes) * contract.frame_ms if out_frame_bytes > 0 else 0.0,
+                        target_buf_ms,
+                        underruns,
+                        "yes" if max_buf_bytes > 0 else "no",
+                    )
+                    last_stats_t = now_stats
         except asyncio.CancelledError:
             return
 
@@ -423,7 +497,6 @@ async def pump_openai_to_freeswitch(
 
             evt_type = evt.get("type")
 
-            # ---- Text events (telemetry): user transcription + assistant text ----
             if evt_type in (
                 "input_audio_transcription.delta",
                 "input_audio_transcription",
@@ -516,7 +589,12 @@ async def pump_openai_to_freeswitch(
                 if max_buf_bytes > 0 and len(buf) > max_buf_bytes:
                     overflow = len(buf) - max_buf_bytes
                     dropped = drop_oldest_frame_aligned(buf, overflow, out_frame_bytes)
-                    logger.debug("Playout buffer capped: dropped_bytes=%d", dropped)
+                    logger.warning(
+                        "Playout buffer capped: dropped_bytes=%d buf_ms_now=%.1f max_buf_ms=%d",
+                        dropped,
+                        (len(buf) / out_frame_bytes) * contract.frame_ms if out_frame_bytes > 0 else 0.0,
+                        cfg.playout_max_buffer_ms,
+                    )
 
             elif evt_type in (
                 "input_audio_buffer.speech_stopped",
