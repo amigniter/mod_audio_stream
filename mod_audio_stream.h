@@ -51,7 +51,6 @@ struct private_data {
     int inject_sample_rate;     
     int inject_bytes_per_sample;
 
-    /* pushback stats (per session) */
     uint64_t inject_write_calls;
     uint64_t inject_bytes;
     uint64_t inject_underruns;

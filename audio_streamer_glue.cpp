@@ -19,7 +19,7 @@
 #define MOD_AUDIO_STREAM_VERSION "1.1.0"
 
 #define FRAME_SIZE_8000  320 
-#define INJECT_BUFFER_MS_DEFAULT 500
+#define INJECT_BUFFER_MS_DEFAULT 60
 #define MAX_AUDIO_BASE64_LEN (4 * 1024 * 1024) 
 
 class AudioStreamer {
