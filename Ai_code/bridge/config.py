@@ -45,6 +45,7 @@ class BridgeConfig:
     openai_input_sample_rate: int
     openai_resample_input: bool
     openai_output_sample_rate: int
+    openai_input_mode: str
     wss_pem: str
     openai_wss_insecure: bool
     send_test_tone_on_connect: bool
@@ -99,6 +100,13 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
     # matches typical Realtime output and prevents "unclear/fast" audio when injecting to 8k FS.
     openai_output_sample_rate = _env_int("OPENAI_OUTPUT_SAMPLE_RATE", 16000)
 
+    # Input mode:
+    # - "buffer": input_audio_buffer.append + commit (legacy and can hit commit_empty)
+    # - "item":   conversation.item.create with input_audio (more reliable for SIP bridges)
+    openai_input_mode = os.getenv("OPENAI_INPUT_MODE", "buffer").strip().lower() or "buffer"
+    if openai_input_mode not in ("buffer", "item"):
+        raise ValueError("OPENAI_INPUT_MODE must be 'buffer' or 'item'")
+
     wss_pem = os.getenv("WSS_PEM", "").strip().strip('"').strip("'")
     if wss_pem and not os.path.isabs(wss_pem):
         wss_pem = str(Path(wss_pem).expanduser().resolve())
@@ -129,6 +137,7 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
         openai_input_sample_rate=openai_input_sample_rate,
         openai_resample_input=openai_resample_input,
         openai_output_sample_rate=openai_output_sample_rate,
+        openai_input_mode=openai_input_mode,
         wss_pem=wss_pem,
         openai_wss_insecure=openai_wss_insecure,
         send_test_tone_on_connect=send_test_tone_on_connect,

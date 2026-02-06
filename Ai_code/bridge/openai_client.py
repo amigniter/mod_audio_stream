@@ -94,7 +94,7 @@ async def connect_openai_realtime(
             "temperature": 0.6,
             "input_audio_format": "pcm16",
             "output_audio_format": "pcm16",
-            "input_audio_transcription": {"model": "gpt-4o-mini-transcribe"},
+            "input_audio_transcription": {"model": "gpt-4o-mini-transcribe", "language": "en"},
             "turn_detection": {"type": "server_vad", "create_response": False},
         },
     }

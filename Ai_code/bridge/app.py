@@ -85,6 +85,12 @@ async def pump_freeswitch_to_openai(
     expected_frame_bytes = frame_bytes(cfg.fs_sample_rate, cfg.fs_channels, cfg.fs_frame_ms)
 
     inbuf = bytearray()
+    # When using item-based input mode, we also keep a local buffer of what we've sent since last turn.
+    # This buffer is flushed by the OpenAI->FS pump on server VAD turn-end.
+    # (Shared via tracker: appended_since_commit_bytes remains the byte counter; item_audio_buf keeps bytes.)
+    # NOTE: We stash the actual PCM bytes on the tracker object to avoid adding more shared state plumbing.
+    if not hasattr(tracker, "item_audio_buf"):
+        setattr(tracker, "item_audio_buf", bytearray())
 
     async for message in upstream_ws:
         if isinstance(message, (bytes, bytearray)):
@@ -136,6 +142,9 @@ async def pump_freeswitch_to_openai(
                     raise
 
                 tracker.on_appended(len(out_pcm))
+                if getattr(cfg, "openai_input_mode", "buffer") == "item":
+                    # Keep a copy so we can send a full utterance as a single conversation.item.create.
+                    getattr(tracker, "item_audio_buf").extend(out_pcm)
 
                 if frames_in == 1 or (frames_in % 50 == 0):
                     logger.debug(
@@ -222,6 +231,54 @@ async def pump_openai_to_freeswitch(
     # If we get a turn-end but don't yet have enough audio appended, remember it
     # and commit as soon as we cross the threshold. This avoids commit_empty.
     pending_turn_end: Optional[str] = None
+
+    async def _send_item_audio_and_respond(reason: str) -> None:
+        """Item-based audio input: send one utterance as a conversation item, then create a response."""
+        nonlocal response_in_flight
+        # Avoid overlapping responses.
+        if response_in_flight:
+            return
+
+        audio_buf = getattr(tracker, "item_audio_buf", None)
+        if not isinstance(audio_buf, (bytearray, bytes)) or len(audio_buf) == 0:
+            logger.debug("Item mode: nothing to send for %s", reason)
+            return
+
+        # Build item create payload.
+        b64_audio = base64.b64encode(bytes(audio_buf)).decode("ascii")
+        item_evt = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_audio", "audio": b64_audio},
+                ],
+            },
+        }
+
+        # Clear buffer before sending to avoid duplicate sends if network glitches.
+        audio_buf.clear()
+        tracker.on_committed()
+
+        logger.info("Item mode: sending conversation.item.create (%s)", reason)
+        await openai_ws.send(json.dumps(item_evt))
+
+        if not _can_create_response():
+            return
+        response_in_flight = True
+        logger.info("Creating response (%s)", reason)
+        await openai_ws.send(
+            json.dumps(
+                {
+                    "type": "response.create",
+                    "response": {
+                        "modalities": ["audio", "text"],
+                        "instructions": "Answer in English in 1-2 short sentences.",
+                    },
+                }
+            )
+        )
 
     def _can_create_response() -> bool:
         nonlocal last_response_create_t
@@ -480,7 +537,11 @@ async def pump_openai_to_freeswitch(
                         tracker.appended_since_commit_bytes,
                         min_commit_bytes,
                     )
-                await _maybe_commit_if_turn_pending()
+                if getattr(cfg, "openai_input_mode", "buffer") == "item":
+                    await _send_item_audio_and_respond(pending_turn_end)
+                    pending_turn_end = None
+                else:
+                    await _maybe_commit_if_turn_pending()
 
             elif evt_type == "input_audio_buffer.committed":
                 # Only now is it safe to create a response.
