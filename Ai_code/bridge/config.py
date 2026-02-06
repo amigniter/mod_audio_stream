@@ -102,7 +102,7 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
 
     # OpenAI input side: many realtime pipelines behave best at 16k mono PCM16.
     openai_input_sample_rate = _env_int("OPENAI_INPUT_SAMPLE_RATE", 16000)
-    openai_resample_input = _env_bool("OPENAI_RESAMPLE_INPUT", True)
+    openai_resample_input = _env_bool("OPENAI_RESAMPLE_INPUT", False)
 
     # OpenAI output side: some audio delta events omit sample_rate. Defaulting to 16k
     # matches typical Realtime output and prevents "unclear/fast" audio when injecting to 8k FS.

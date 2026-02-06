@@ -59,13 +59,6 @@ def _extract_text(evt: dict[str, Any]) -> str:
     return ""
 
 
-def _ratecv_pcm16_mono(pcm: bytes, src_rate: int, dst_rate: int, state: Any) -> tuple[bytes, Any]:
-    if not pcm or src_rate == dst_rate:
-        return pcm, state
-    converted, new_state = audioop.ratecv(pcm, 2, 1, src_rate, dst_rate, state)
-    return ensure_even_bytes(converted), new_state
-
-
 async def pump_freeswitch_to_openai(
     upstream_ws: websockets.WebSocketServerProtocol,
     openai_ws: websockets.WebSocketClientProtocol,
@@ -76,10 +69,8 @@ async def pump_freeswitch_to_openai(
     frames_in = 0
     started = False
 
-    # OpenAI side input settings (we may resample FS audio before append)
+    # IMPORTANT: no resampling in Python. We forward audio as-is (optionally downmixed to mono).
     openai_in_rate = int(getattr(cfg, "openai_input_sample_rate", cfg.fs_sample_rate))
-    openai_resample = bool(getattr(cfg, "openai_resample_input", False))
-    to_openai_ratecv_state = None
 
     expected_frame_bytes = frame_bytes(cfg.fs_sample_rate, cfg.fs_channels, cfg.fs_frame_ms)
 
@@ -114,18 +105,7 @@ async def pump_freeswitch_to_openai(
                     except Exception:
                         pass
 
-                if openai_resample and openai_in_rate != cfg.fs_sample_rate:
-                    try:
-                        out_pcm, to_openai_ratecv_state = _ratecv_pcm16_mono(
-                            out_pcm,
-                            cfg.fs_sample_rate,
-                            openai_in_rate,
-                            to_openai_ratecv_state,
-                        )
-                    except Exception:
-                        out_pcm = ensure_even_bytes(out_pcm)
-                else:
-                    out_pcm = ensure_even_bytes(out_pcm)
+                out_pcm = ensure_even_bytes(out_pcm)
 
                 try:
                     await openai_ws.send(
@@ -159,7 +139,7 @@ async def pump_freeswitch_to_openai(
                         frames_in,
                         tracker.appended_since_commit_bytes,
                         openai_in_rate,
-                        openai_resample,
+                        False,
                     )
 
             if frames_in and frames_in % 50 == 0:
@@ -190,20 +170,27 @@ async def pump_openai_to_freeswitch(
         frame_ms=int(cfg.fs_frame_ms),
     )
 
-    out_frame_bytes = frame_bytes(contract.sample_rate, contract.channels, contract.frame_ms)
+    # IMPORTANT:
+    # We buffer and slice *OpenAI output* audio in frames that match the sampleRate we declare
+    # in the JSON payload. The C++ module will resample those frames to the FS session rate.
+    # If we slice using FS-rate frame sizes while buffering 16k audio, we create 10ms chunks
+    # after resample and trigger injector underruns.
+    openai_out_rate = int(getattr(cfg, "openai_output_sample_rate", contract.sample_rate))
+    openai_out_channels = 1
+
+    out_frame_bytes = frame_bytes(openai_out_rate, openai_out_channels, contract.frame_ms)
 
     buf = bytearray()
 
     # Precomputed silence frame used when we need to maintain timing but have no audio.
-    # This helps reduce audible clicks/warbles on minor jitter/underruns.
     silence_frame = b"\x00" * out_frame_bytes
 
     max_buf_bytes = ceil_to_frame(
-        frame_bytes(cfg.fs_sample_rate, cfg.fs_channels, max(cfg.playout_max_buffer_ms, cfg.fs_frame_ms)),
+        frame_bytes(openai_out_rate, openai_out_channels, max(cfg.playout_max_buffer_ms, cfg.fs_frame_ms)),
         out_frame_bytes,
     )
     prebuffer_bytes = ceil_to_frame(
-        frame_bytes(cfg.fs_sample_rate, cfg.fs_channels, max(cfg.playout_prebuffer_ms, 0)),
+        frame_bytes(openai_out_rate, openai_out_channels, max(cfg.playout_prebuffer_ms, 0)),
         out_frame_bytes,
     )
 
@@ -250,7 +237,7 @@ async def pump_openai_to_freeswitch(
         max_drain_frames = 4
 
     target_buf_bytes = ceil_to_frame(
-        frame_bytes(cfg.fs_sample_rate, cfg.fs_channels, target_buf_ms),
+        frame_bytes(openai_out_rate, openai_out_channels, target_buf_ms),
         out_frame_bytes,
     )
 
@@ -460,8 +447,8 @@ async def pump_openai_to_freeswitch(
                         payload = fs_stream_audio_json(
                             frame,
                             contract,
-                            sample_rate_override=int(getattr(cfg, "openai_output_sample_rate", contract.sample_rate)),
-                            channels_override=1,
+                            sample_rate_override=openai_out_rate,
+                            channels_override=openai_out_channels,
                         )
                     else:
                         payload = frame
