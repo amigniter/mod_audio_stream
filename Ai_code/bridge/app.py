@@ -375,8 +375,6 @@ async def pump_openai_to_freeswitch(
         if commit_pending:
             return
 
-        # IMPORTANT: do not commit if we haven't appended enough audio.
-        # This prevents input_audio_buffer_commit_empty.
         if tracker.appended_since_commit_bytes < min_commit_bytes:
             logger.debug(
                 "Skipping commit (%s): appended=%d (<%d bytes)",
@@ -448,10 +446,6 @@ async def pump_openai_to_freeswitch(
 
                 next_t += step_s
 
-                # Adaptive drain:
-                # - Normally send 1 frame per tick.
-                # - If buffer is much larger than target, send 2 frames (or more, bounded).
-                # This reduces the need to hard-drop old audio when OpenAI arrives in bursts.
                 frames_to_send = 1
                 if target_buf_bytes > 0 and len(buf) > target_buf_bytes + (out_frame_bytes * 6):
                     extra = (len(buf) - target_buf_bytes) // out_frame_bytes
@@ -462,7 +456,6 @@ async def pump_openai_to_freeswitch(
                         frame = bytes(buf[:out_frame_bytes])
                         del buf[:out_frame_bytes]
                     else:
-                        # Underrun: send silence to maintain timing.
                         frame = silence_frame
                         underruns += 1
 
