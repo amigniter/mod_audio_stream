@@ -44,6 +44,7 @@ class BridgeConfig:
     fs_send_json_handshake: bool
     openai_input_sample_rate: int
     openai_resample_input: bool
+    openai_output_sample_rate: int
     wss_pem: str
     openai_wss_insecure: bool
     send_test_tone_on_connect: bool
@@ -94,6 +95,10 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
     openai_input_sample_rate = _env_int("OPENAI_INPUT_SAMPLE_RATE", 16000)
     openai_resample_input = _env_bool("OPENAI_RESAMPLE_INPUT", True)
 
+    # OpenAI output side: some audio delta events omit sample_rate. Defaulting to 16k
+    # matches typical Realtime output and prevents "unclear/fast" audio when injecting to 8k FS.
+    openai_output_sample_rate = _env_int("OPENAI_OUTPUT_SAMPLE_RATE", 16000)
+
     wss_pem = os.getenv("WSS_PEM", "").strip().strip('"').strip("'")
     if wss_pem and not os.path.isabs(wss_pem):
         wss_pem = str(Path(wss_pem).expanduser().resolve())
@@ -123,6 +128,7 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
         fs_send_json_handshake=fs_send_json_handshake,
         openai_input_sample_rate=openai_input_sample_rate,
         openai_resample_input=openai_resample_input,
+        openai_output_sample_rate=openai_output_sample_rate,
         wss_pem=wss_pem,
         openai_wss_insecure=openai_wss_insecure,
         send_test_tone_on_connect=send_test_tone_on_connect,

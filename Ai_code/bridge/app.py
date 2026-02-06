@@ -12,6 +12,7 @@ from .audio import ceil_to_frame, ensure_even_bytes, frame_bytes, drop_oldest_fr
 from .config import BridgeConfig
 from .fs_payloads import FsAudioContract, fs_handshake_json, fs_stream_audio_json
 from .openai_client import build_ssl_context, connect_openai_realtime
+from .resample import PCM16Resampler
 
 logger = logging.getLogger(__name__)
 
@@ -194,8 +195,9 @@ async def pump_openai_to_freeswitch(
         out_frame_bytes,
     )
 
-    resample_state = None  
-    fs_out_resample_state = None  
+    # Output path resamplers (stateful across deltas)
+    openai_to_fs_resampler = None
+    fs_to_out_resampler = None
 
     # OpenAI requires ~>=100ms buffered before commit.
     # IMPORTANT: threshold must be computed in the same format/rate we appended.
@@ -373,8 +375,11 @@ async def pump_openai_to_freeswitch(
             ):
                 t = _extract_text(evt)
                 if t:
-                    user_text_buf.append(t)
-                    logger.info("USER_TEXT: %s", "".join(user_text_buf).strip())
+                    # Deltas can repeat/overlap; only print stable text at completion.
+                    if evt_type.endswith(".completed"):
+                        user_text_buf.append(t)
+                        logger.info("USER_TEXT: %s", "".join(user_text_buf).strip())
+                        user_text_buf.clear()
                 continue
 
             if evt_type in (
@@ -419,23 +424,35 @@ async def pump_openai_to_freeswitch(
 
                 pcm = ensure_even_bytes(pcm)
 
-                src_rate = cfg.fs_sample_rate
-                src_ch = cfg.fs_channels
+                # Default OpenAI output is typically 16k mono PCM16.
+                # Some events omit sample_rate/channels; use config defaults in that case.
+                src_rate = int(getattr(cfg, "openai_output_sample_rate", cfg.fs_sample_rate))
+                src_ch = 1
                 if isinstance(evt.get("sample_rate"), int):
                     src_rate = int(evt["sample_rate"])
                 if isinstance(evt.get("channels"), int):
                     src_ch = int(evt["channels"])
 
-                if src_ch != 1:
-                    pcm = audioop.tomono(pcm, 2, 0.5, 0.5)  # best-effort
-
-                if src_rate != cfg.fs_sample_rate:
-                    pcm, resample_state = _ratecv_pcm16_mono(pcm, src_rate, cfg.fs_sample_rate, resample_state)
-
-                if cfg.fs_out_sample_rate != cfg.fs_sample_rate:
-                    pcm, fs_out_resample_state = _ratecv_pcm16_mono(
-                        pcm, cfg.fs_sample_rate, cfg.fs_out_sample_rate, fs_out_resample_state
+                # OpenAI -> FS (mono @ FS_SAMPLE_RATE)
+                if openai_to_fs_resampler is None or openai_to_fs_resampler.src_rate != src_rate or openai_to_fs_resampler.src_channels != src_ch:
+                    openai_to_fs_resampler = PCM16Resampler(
+                        src_rate=src_rate,
+                        dst_rate=cfg.fs_sample_rate,
+                        src_channels=src_ch,
+                        dst_channels=1,
                     )
+                pcm = openai_to_fs_resampler.convert(pcm)
+
+                # FS internal -> FS output rate (often same, but keep correct)
+                if cfg.fs_out_sample_rate != cfg.fs_sample_rate:
+                    if fs_to_out_resampler is None:
+                        fs_to_out_resampler = PCM16Resampler(
+                            src_rate=cfg.fs_sample_rate,
+                            dst_rate=cfg.fs_out_sample_rate,
+                            src_channels=1,
+                            dst_channels=1,
+                        )
+                    pcm = fs_to_out_resampler.convert(pcm)
 
                 buf.extend(pcm)
 
@@ -466,17 +483,15 @@ async def pump_openai_to_freeswitch(
                 await _maybe_commit_if_turn_pending()
 
             elif evt_type == "input_audio_buffer.committed":
-                if commit_pending:
-                    tracker.on_commit_acked()
-                    tracker.on_committed()
-                    reason = commit_reason or "commit_ack"
-                    commit_pending = False
-                    commit_reason = None
-                    response_ready = True
-                    response_ready_reason = reason
-                    await _maybe_create_response(reason)
-                else:
-                    tracker.on_committed()
+                # Only now is it safe to create a response.
+                tracker.on_commit_acked()
+                tracker.on_committed()
+                reason = commit_reason or "commit_ack"
+                commit_pending = False
+                commit_reason = None
+                response_ready = True
+                response_ready_reason = reason
+                await _maybe_create_response(reason)
 
             # After any event, if we have a pending turn-end and enough audio has since arrived,
             # commit it immediately.
