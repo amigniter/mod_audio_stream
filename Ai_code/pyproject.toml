@@ -1,0 +1,15 @@
+[project]
+name = "mod-audio-stream-bridge"
+version = "0.1.0"
+description = "OpenAI Realtime <-> FreeSWITCH bridge for mod_audio_stream"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "websockets>=12.0",
+  "python-dotenv>=1.0.0",
+]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-q"
+testpaths = ["tests"]

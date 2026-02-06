@@ -3,3 +3,10 @@ cmake-build-debug/
 .vscode/
 build/
 _packages
+
+# Python bridge
+Ai_code/.env
+Ai_code/.venv/
+Ai_code/__pycache__/
+Ai_code/**/__pycache__/
+.pytest_cache/
