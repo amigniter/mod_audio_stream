@@ -649,16 +649,15 @@ private:
             decoded.resize(decoded.size() - (decoded.size() % frame_bytes_20ms));
         }
 
-    const int channels = out_channels;
         switch_mutex_lock(tech_pvt->mutex);
 
-    tech_pvt->inject_sample_rate = out_sr;
-    tech_pvt->inject_bytes_per_sample = 2;
-    const int inject_sr = tech_pvt->inject_sample_rate;
+        tech_pvt->inject_sample_rate = out_sr;
+        tech_pvt->inject_bytes_per_sample = 2;
+        const int inject_sr = tech_pvt->inject_sample_rate;
 
-    const switch_size_t inuse_before = switch_buffer_inuse(tech_pvt->inject_buffer);
-    const switch_size_t free_before = switch_buffer_freespace(tech_pvt->inject_buffer);
-    const size_t max_bytes = (size_t)inuse_before + (size_t)free_before;
+        const switch_size_t inuse_before = switch_buffer_inuse(tech_pvt->inject_buffer);
+        const switch_size_t free_before = switch_buffer_freespace(tech_pvt->inject_buffer);
+        const size_t max_bytes = (size_t)inuse_before + (size_t)free_before;
 
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
                           "(%s) processMessage: inject_sample_rate=%d max_bytes=%zu (buffer_len)\n",
@@ -692,8 +691,8 @@ private:
             }
         }
 
-    switch_buffer_write(tech_pvt->inject_buffer, decoded.data(), (switch_size_t)decoded.size());
-	const switch_size_t inuse_after = switch_buffer_inuse(tech_pvt->inject_buffer);
+        switch_buffer_write(tech_pvt->inject_buffer, decoded.data(), (switch_size_t)decoded.size());
+        const switch_size_t inuse_after = switch_buffer_inuse(tech_pvt->inject_buffer);
         switch_mutex_unlock(tech_pvt->mutex);
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,

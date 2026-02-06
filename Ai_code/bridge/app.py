@@ -12,7 +12,6 @@ from .audio import ceil_to_frame, ensure_even_bytes, frame_bytes, drop_oldest_fr
 from .config import BridgeConfig
 from .fs_payloads import FsAudioContract, fs_handshake_json, fs_stream_audio_json
 from .openai_client import build_ssl_context, connect_openai_realtime
-from .resample import PCM16Resampler
 
 logger = logging.getLogger(__name__)
 
@@ -208,9 +207,7 @@ async def pump_openai_to_freeswitch(
         out_frame_bytes,
     )
 
-    # Output path resamplers (stateful across deltas)
-    openai_to_fs_resampler = None
-    fs_to_out_resampler = None
+    # Output path: no Python resampling (C++ SpeexDSP handles it on injection).
 
     # OpenAI requires ~>=100ms buffered before commit.
     # IMPORTANT: threshold must be computed in the same format/rate we appended.
@@ -459,7 +456,15 @@ async def pump_openai_to_freeswitch(
                         frame = silence_frame
                         underruns += 1
 
-                    payload = fs_stream_audio_json(frame, contract) if cfg.fs_send_json_audio else frame
+                    if cfg.fs_send_json_audio:
+                        payload = fs_stream_audio_json(
+                            frame,
+                            contract,
+                            sample_rate_override=int(getattr(cfg, "openai_output_sample_rate", contract.sample_rate)),
+                            channels_override=1,
+                        )
+                    else:
+                        payload = frame
                     await upstream_ws.send(payload)
                     frames_sent += 1
 
@@ -556,26 +561,14 @@ async def pump_openai_to_freeswitch(
                 if isinstance(evt.get("channels"), int):
                     src_ch = int(evt["channels"])
 
-                # OpenAI -> FS (mono @ FS_SAMPLE_RATE)
-                if openai_to_fs_resampler is None or openai_to_fs_resampler.src_rate != src_rate or openai_to_fs_resampler.src_channels != src_ch:
-                    openai_to_fs_resampler = PCM16Resampler(
-                        src_rate=src_rate,
-                        dst_rate=cfg.fs_sample_rate,
-                        src_channels=src_ch,
-                        dst_channels=1,
-                    )
-                pcm = openai_to_fs_resampler.convert(pcm)
-
-                # FS internal -> FS output rate (often same, but keep correct)
-                if cfg.fs_out_sample_rate != cfg.fs_sample_rate:
-                    if fs_to_out_resampler is None:
-                        fs_to_out_resampler = PCM16Resampler(
-                            src_rate=cfg.fs_sample_rate,
-                            dst_rate=cfg.fs_out_sample_rate,
-                            src_channels=1,
-                            dst_channels=1,
-                        )
-                    pcm = fs_to_out_resampler.convert(pcm)
+                # Do not resample here. We rely on `mod_audio_stream` (SpeexDSP) to resample on injection.
+                # Ensure mono.
+                if src_ch != 1:
+                    try:
+                        pcm = audioop.tomono(pcm, 2, 0.5, 0.5)
+                        src_ch = 1
+                    except Exception:
+                        pcm = ensure_even_bytes(pcm)
 
                 buf.extend(pcm)
 

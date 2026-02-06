@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 from dataclasses import dataclass
+from typing import Optional
 from .audio import b64encode_pcm16
 
 @dataclass(frozen=True)
@@ -10,7 +11,13 @@ class FsAudioContract:
     frame_ms: int
 
 
-def fs_stream_audio_json(frame_pcm16: bytes, contract: FsAudioContract) -> str:
+def fs_stream_audio_json(
+    frame_pcm16: bytes,
+    contract: FsAudioContract,
+    *,
+    sample_rate_override: Optional[int] = None,
+    channels_override: Optional[int] = None,
+) -> str:
     """Build JSON text frame that `audio_streamer_glue.cpp::processMessage` accepts.
 
     Expected schema (per your custom mod):
@@ -28,11 +35,14 @@ def fs_stream_audio_json(frame_pcm16: bytes, contract: FsAudioContract) -> str:
     - sampleRate is required.
     """
 
+    sample_rate = int(sample_rate_override if sample_rate_override is not None else contract.sample_rate)
+    channels = int(channels_override if channels_override is not None else contract.channels)
+
     data = {
         "audioDataType": "raw",
         "audioData": b64encode_pcm16(frame_pcm16),
-        "sampleRate": int(contract.sample_rate),
-        "channels": int(contract.channels),
+        "sampleRate": sample_rate,
+        "channels": channels,
     }
     return json.dumps({"type": "streamAudio", "data": data}, separators=(",", ":"))
 
