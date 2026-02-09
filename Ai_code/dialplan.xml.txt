@@ -1,0 +1,17 @@
+
+<include>
+  <context name="default">
+    <extension name="ai_ivrs_1234">
+      <condition field="destination_number" expression="^1234$">
+        <action application="answer"/>
+        <action application="playback" data="tone_stream://%(2000,0,440,480)"/>
+        <action application="set" data="media_bug_answer_req=true"/>
+        <action application="set" data="STREAM_BUFFER_SIZE=20"/>
+        <action application="set" data="STREAM_SUPPRESS_LOG=false"/>
+        <action application="export"
+                data="nolocal:api_on_answer=sched_api +1 none uuid_audio_stream ${uuid} start ws://127.0.0.1:8765 mono 8000"/>
+        <action application="playback" data="silence_stream://-1"/>
+      </condition>
+    </extension>
+  </context>
+</include>
