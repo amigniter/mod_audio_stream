@@ -41,8 +41,9 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
 
     case SWITCH_ABC_TYPE_CLOSE:
         {
-            int channel_closing =
-                tech_pvt->close_requested ? 0 : 1;
+            tech_pvt->close_requested = SWITCH_TRUE;
+
+            int channel_closing = 1;
 
             stream_session_cleanup(session, NULL, channel_closing);
         }
@@ -68,18 +69,36 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
             switch_size_t to_read = 0;
             switch_size_t got = 0;
 
-            /* Read injected audio into a temporary buffer so we can MIX it with the
-               current outbound audio (instead of replacing with silence on underrun). */
-            uint8_t *inj = (uint8_t *)switch_core_session_alloc(session, need);
-            if (!inj) {
-                break;
-            }
-            memset(inj, 0, need);
-
             switch_mutex_lock(tech_pvt->mutex);
 
+            if (!tech_pvt->inject_scratch || tech_pvt->inject_scratch_len < need) {
+                uint8_t *nbuf = (uint8_t *)switch_core_session_alloc(session, need);
+                if (!nbuf) {
+                    switch_mutex_unlock(tech_pvt->mutex);
+                    break;
+                }
+                tech_pvt->inject_scratch = nbuf;
+                tech_pvt->inject_scratch_len = need;
+            }
+
+            uint8_t *inj = tech_pvt->inject_scratch;
+            memset(inj, 0, need);
+
             avail = switch_buffer_inuse(tech_pvt->inject_buffer);
-            to_read = (avail > need) ? need : avail;
+
+            /* Optional jitter buffer: wait until we have at least inject_min_buffer_ms queued. */
+            if (tech_pvt->inject_min_buffer_ms > 0 && tech_pvt->inject_sample_rate > 0) {
+                const switch_size_t bytes_per_ms = (switch_size_t)tech_pvt->inject_sample_rate * 2u * (switch_size_t)tech_pvt->channels / 1000u;
+                const switch_size_t min_bytes = bytes_per_ms * (switch_size_t)tech_pvt->inject_min_buffer_ms;
+                if (avail < min_bytes) {
+                    /* Not enough audio yet: mix silence this frame to keep the call stable. */
+                    to_read = 0;
+                } else {
+                    to_read = (avail > need) ? need : avail;
+                }
+            } else {
+                to_read = (avail > need) ? need : avail;
+            }
             if (to_read > 0) {
                 got = switch_buffer_read(tech_pvt->inject_buffer, inj, to_read);
             }
@@ -97,9 +116,6 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
                                   (unsigned long)avail);
             }
 
-            /* Mix PCM16LE samples with saturation.
-               NOTE: This assumes the bug write frame is PCM16, which matches this module's
-               injection format and typical FS linear audio frames. */
             {
                 int16_t *dst = (int16_t *)frame->data;
                 const int16_t *src = (const int16_t *)inj;
@@ -146,6 +162,14 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
     return SWITCH_TRUE;
 }
 
+static int get_channel_var_int(switch_core_session_t *session, const char* name, int def)
+{
+    switch_channel_t *channel = switch_core_session_get_channel(session);
+    const char* val = channel ? switch_channel_get_variable(channel, name) : NULL;
+    if (!val || !*val) return def;
+    return atoi(val);
+}
+
 static switch_status_t start_capture(switch_core_session_t *session,
                                      switch_media_bug_flag_t flags,
                                      char* wsUri,
@@ -160,6 +184,8 @@ static switch_status_t start_capture(switch_core_session_t *session,
     void *pUserData = NULL;
 
     int channels = (flags & SMBF_STEREO) ? 2 : 1;
+    /* Allow per-call tuning via channel vars (defaults handled in glue.cpp). */
+    (void)get_channel_var_int(session, "STREAM_FRAME_MS", 0);
 
     if (switch_channel_get_private(channel, MY_BUG_NAME)) {
         return SWITCH_STATUS_FALSE;
@@ -254,15 +280,35 @@ SWITCH_STANDARD_API(stream_function)
         status = do_pauseresume(lsession, 0);
     }
     else if (!strcasecmp(argv[1], "send_text")) {
-        status = send_text(lsession, argv[2]);
+        status = (argc > 2 && argv[2]) ? send_text(lsession, argv[2]) : SWITCH_STATUS_FALSE;
     }
     else if (!strcasecmp(argv[1], "start")) {
 
-        char wsUri[MAX_WS_URI];
-        int sampling = 8000;
-        switch_media_bug_flag_t flags = SMBF_READ_STREAM;
+    char wsUri[MAX_WS_URI];
+    int sampling = 8000;
+    switch_media_bug_flag_t flags = SMBF_READ_STREAM;
+    int channels = 1;
 
         if (!validate_ws_uri(argv[2], wsUri)) goto done;
+
+        if (argc > 3 && argv[3]) {
+            if (!strcasecmp(argv[3], "mono")) {
+                channels = 1;
+            } else if (!strcasecmp(argv[3], "mixed")) {
+#ifdef SMBF_OPT_MIXED_READ
+                flags |= SMBF_OPT_MIXED_READ;
+#else
+                /* Some FreeSWITCH builds don't expose SMBF_OPT_MIXED_READ; fall back to normal read stream. */
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(lsession), SWITCH_LOG_WARNING,
+                                  "(%s) 'mixed' requested but SMBF_OPT_MIXED_READ not available; falling back to mono.\n",
+                                  switch_core_session_get_uuid(lsession));
+#endif
+                channels = 1;
+            } else if (!strcasecmp(argv[3], "stereo")) {
+                flags |= SMBF_STEREO;
+                channels = 2;
+            }
+        }
 
         if (argc > 4) sampling = atoi(argv[4]);
 
