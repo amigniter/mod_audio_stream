@@ -403,6 +403,9 @@ async def pump_openai_to_freeswitch(
         frames_sent = 0
         underruns = 0
         last_stats_t = time.monotonic()
+        last_stats_frames_sent = 0
+        last_stats_underruns = 0
+        last_stats_buf_len = 0
 
         if prebuffer_bytes > 0:
             while len(buf) < prebuffer_bytes:
@@ -430,10 +433,12 @@ async def pump_openai_to_freeswitch(
 
                 next_t += step_s
 
+                # IMPORTANT: Never "drain faster than real time" in the general case.
+                # Draining sends audio early and will inevitably cause later starvation when the
+                # upstream becomes bursty or stalls for a moment.
+                # We keep cadence at 1 frame/tick and rely on drop-oldest (max_buf_bytes cap)
+                # to bound latency.
                 frames_to_send = 1
-                if target_buf_bytes > 0 and len(buf) > target_buf_bytes + (out_frame_bytes * 6):
-                    extra = (len(buf) - target_buf_bytes) // out_frame_bytes
-                    frames_to_send = min(max_drain_frames, max(2, int(extra)))
 
                 for _ in range(frames_to_send):
                     if len(buf) >= out_frame_bytes:
@@ -457,15 +462,26 @@ async def pump_openai_to_freeswitch(
 
                 now_stats = time.monotonic()
                 if now_stats - last_stats_t >= 5.0:
+                    dt = now_stats - last_stats_t
+                    sent_delta = frames_sent - last_stats_frames_sent
+                    underrun_delta = underruns - last_stats_underruns
+                    buf_delta = len(buf) - last_stats_buf_len
                     logger.info(
-                        "Playout stats: frames_sent=%d buf_ms=%.1f target_ms=%d underruns=%d drops_capped_by_max=%s",
+                        "Playout stats: frames_sent=%d (+%d/%.1fs) buf_ms=%.1f (delta_bytes=%d) target_ms=%d underruns=%d (+%d) drops_capped_by_max=%s",
                         frames_sent,
+                        sent_delta,
+                        dt,
                         (len(buf) / out_frame_bytes) * contract.frame_ms if out_frame_bytes > 0 else 0.0,
+                        buf_delta,
                         target_buf_ms,
                         underruns,
+                        underrun_delta,
                         "yes" if max_buf_bytes > 0 else "no",
                     )
                     last_stats_t = now_stats
+                    last_stats_frames_sent = frames_sent
+                    last_stats_underruns = underruns
+                    last_stats_buf_len = len(buf)
         except asyncio.CancelledError:
             return
 

@@ -80,14 +80,17 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
 
     fs_out_sample_rate = _env_int("FS_OUT_SAMPLE_RATE", fs_sample_rate)
 
-    playout_prebuffer_ms = _env_int("PLAYOUT_PREBUFFER_MS", 60)
-    playout_max_buffer_ms = _env_int("PLAYOUT_MAX_BUFFER_MS", 1200)
+    # OpenAI output audio tends to arrive in bursts. A larger prebuffer helps eliminate underruns
+    # at the cost of some added latency.
+    playout_prebuffer_ms = _env_int("PLAYOUT_PREBUFFER_MS", 250)
+    playout_max_buffer_ms = _env_int("PLAYOUT_MAX_BUFFER_MS", 2500)
     playout_catchup_max_ms = _env_int("PLAYOUT_CATCHUP_MAX_MS", 120)
     playout_sleep_granularity_ms = _env_int("PLAYOUT_SLEEP_GRANULARITY_MS", 2)
 
     # Adaptive playout: keep a steady buffer to smooth bursty output.
     # Defaults are conservative and can be tuned per deployment.
-    playout_target_buffer_ms = _env_int("PLAYOUT_TARGET_BUFFER_MS", 300)
+    playout_target_buffer_ms = _env_int("PLAYOUT_TARGET_BUFFER_MS", 800)
+    # Keep for compatibility; app.py currently avoids draining faster than real-time.
     playout_max_drain_frames = _env_int("PLAYOUT_MAX_DRAIN_FRAMES", 2)
 
     force_commit_ms = _env_int("OPENAI_FORCE_COMMIT_MS", 0)
@@ -140,8 +143,8 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
         playout_max_buffer_ms=playout_max_buffer_ms,
         playout_catchup_max_ms=playout_catchup_max_ms,
         playout_sleep_granularity_ms=playout_sleep_granularity_ms,
-    playout_target_buffer_ms=playout_target_buffer_ms,
-    playout_max_drain_frames=playout_max_drain_frames,
+        playout_target_buffer_ms=playout_target_buffer_ms,
+        playout_max_drain_frames=playout_max_drain_frames,
         force_commit_ms=force_commit_ms,
         force_response_on_commit=force_response_on_commit,
         response_min_interval_ms=response_min_interval_ms,
