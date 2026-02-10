@@ -35,6 +35,20 @@ static inline void mod_audio_stream_free_json(char* p) {
 #define STREAM_MAX_QUEUE_MS_DEFAULT 0
 #define FILE_INJECT_MAX_SIZE (16 * 1024 * 1024)
 
+/**
+ * Speex resampler quality for audio injection path (AI voice → caller).
+ *
+ * SWITCH_RESAMPLE_QUALITY (FreeSWITCH default, typically 3) is too low
+ * for the 24kHz→8kHz downsampling path — it causes audible aliasing
+ * artifacts that make the AI voice sound metallic/robotic.
+ *
+ * Quality 7 = sinc interpolation, broadcast-grade, still fast enough
+ * for real-time on any modern CPU.  Quality 10 is overkill for telephony.
+ *
+ * This single change is the biggest improvement for natural-sounding voice.
+ */
+#define INJECT_RESAMPLE_QUALITY 7
+
 static inline size_t pcm16_bytes_per_ms(int sampleRate, int channels) {
     if (sampleRate <= 0 || channels <= 0) return 0;
     return (size_t)sampleRate * 2u * (size_t)channels / 1000u;
@@ -63,6 +77,8 @@ static inline void byteswap_inplace_16(std::string& s) {
     }
 }
 
+#include <sys/stat.h>
+
 static inline bool is_safe_file_path(const char* path) {
     if (!path || !*path) return false;
     if (strstr(path, "..") != nullptr) return false;
@@ -71,6 +87,9 @@ static inline bool is_safe_file_path(const char* path) {
     if (strncmp(path, "/proc/", 6) == 0) return false;
     if (strncmp(path, "/sys/", 5) == 0) return false;
     if (strncmp(path, "/dev/", 5) == 0) return false;
+    /* Reject symlinks to prevent traversal via /tmp/evil -> /etc/shadow */
+    struct stat st;
+    if (lstat(path, &st) == 0 && S_ISLNK(st.st_mode)) return false;
     return true;
 }
 
@@ -481,6 +500,28 @@ private:
         const char* jsAudioDataType = cJSON_GetObjectCstr(jsonData, "audioDataType");
         if (!jsAudioDataType) jsAudioDataType = "";
 
+        /* ── Barge-in clear command: flush inject_buffer immediately ── */
+        cJSON* jsonClear = cJSON_GetObjectItem(jsonData, "clear");
+        if (jsonClear && cJSON_IsTrue(jsonClear)) {
+            switch_media_bug_t* bug = get_media_bug(psession);
+            if (bug) {
+                auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
+                if (tech_pvt && tech_pvt->inject_buffer) {
+                    switch_mutex_lock(tech_pvt->mutex);
+                    const switch_size_t flushed = switch_buffer_inuse(tech_pvt->inject_buffer);
+                    switch_buffer_zero(tech_pvt->inject_buffer);
+                    switch_mutex_unlock(tech_pvt->mutex);
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
+                                      "(%s) processMessage: barge-in clear — flushed %u bytes from inject_buffer\n",
+                                      m_sessionId.c_str(), (unsigned)flushed);
+                }
+            }
+            /* Return success with empty rewrite — no audio to inject */
+            out.ok = SWITCH_TRUE;
+            out.rewrittenJsonData = "{}";
+            return out;
+        }
+
         jsonPtr jsonAudio(cJSON_DetachItemFromObject(jsonData, "audioData"), &cJSON_Delete);
 
         std::string decoded;
@@ -667,19 +708,22 @@ private:
         }
 
         if (sampleRate != out_sr) {
+            /* Resample under a short lock — only touch inject_resampler, then unlock for the actual resample work */
+            SpeexResamplerState* local_resampler = nullptr;
+
             switch_mutex_lock(tech_pvt->mutex);
             if (!tech_pvt->inject_resampler) {
                 int err = 0;
                 tech_pvt->inject_resampler = speex_resampler_init(out_channels, sampleRate, out_sr,
-                                                                  SWITCH_RESAMPLE_QUALITY, &err);
+                                                                  INJECT_RESAMPLE_QUALITY, &err);
                 if (err != 0 || !tech_pvt->inject_resampler) {
                     switch_mutex_unlock(tech_pvt->mutex);
                     push_err(out, m_sessionId, "processMessage - failed to init inject resampler");
                     return out;
                 }
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
-                                  "(%s) processMessage: created inject resampler %d -> %d ch=%d\n",
-                                  m_sessionId.c_str(), sampleRate, out_sr, out_channels);
+                                  "(%s) processMessage: created inject resampler %d -> %d ch=%d quality=%d\n",
+                                  m_sessionId.c_str(), sampleRate, out_sr, out_channels, INJECT_RESAMPLE_QUALITY);
             } else {
                 spx_uint32_t in_r = 0, out_r = 0;
                 speex_resampler_get_rate(tech_pvt->inject_resampler, &in_r, &out_r);
@@ -688,7 +732,7 @@ private:
                     tech_pvt->inject_resampler = nullptr;
                     int err = 0;
                     tech_pvt->inject_resampler = speex_resampler_init(out_channels, sampleRate, out_sr,
-                                                                      SWITCH_RESAMPLE_QUALITY, &err);
+                                                                      INJECT_RESAMPLE_QUALITY, &err);
                     if (err != 0 || !tech_pvt->inject_resampler) {
                         switch_mutex_unlock(tech_pvt->mutex);
                         push_err(out, m_sessionId, "processMessage - failed to reinit inject resampler");
@@ -699,11 +743,12 @@ private:
                                       m_sessionId.c_str(), sampleRate, out_sr, out_channels);
                 }
             }
-
-            decoded = resample_pcm16le_speex((const uint8_t*)decoded.data(), decoded.size(), out_channels,
-                                            sampleRate, out_sr, tech_pvt->inject_resampler);
-
+            local_resampler = tech_pvt->inject_resampler;
             switch_mutex_unlock(tech_pvt->mutex);
+
+            /* Do the actual resample work outside the mutex to minimize contention */
+            decoded = resample_pcm16le_speex((const uint8_t*)decoded.data(), decoded.size(), out_channels,
+                                            sampleRate, out_sr, local_resampler);
         
             sampleRate = out_sr;
 
@@ -842,10 +887,9 @@ namespace {
               "(%s) mod_audio_stream build version %s running\n",
               _uuid_log, MOD_AUDIO_STREAM_VERSION);
 
+          /* Save cfg before zeroing — it was set by the caller */
           const private_data_config_t saved_cfg = tech_pvt->cfg;
-
           memset(tech_pvt, 0, sizeof(private_t));
-
           tech_pvt->cfg = saved_cfg;
 
     strncpy(tech_pvt->sessionId, switch_core_session_get_uuid(session), MAX_SESSION_ID);
@@ -926,7 +970,7 @@ namespace {
 
         if (desiredSampling != sampling) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) resampling from %u to %u\n", tech_pvt->sessionId, sampling, desiredSampling);
-            tech_pvt->resampler = speex_resampler_init(channels, sampling, desiredSampling, SWITCH_RESAMPLE_QUALITY, &err);
+            tech_pvt->resampler = speex_resampler_init(channels, sampling, desiredSampling, INJECT_RESAMPLE_QUALITY, &err);
             if (0 != err) {
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing resampler: %s.\n", speex_resampler_strerror(err));
                 return SWITCH_STATUS_FALSE;
@@ -1002,6 +1046,14 @@ extern "C" {
                     return 0;
                 }
                 ++portStart;
+            }
+        }
+
+        /* Validate path: reject directory traversal in path/query */
+        const char* pathStart = std::strchr(hostEnd, '/');
+        if (pathStart) {
+            if (std::strstr(pathStart, "..") != nullptr) {
+                return 0;
             }
         }
 

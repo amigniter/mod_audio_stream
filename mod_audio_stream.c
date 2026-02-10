@@ -108,11 +108,18 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
                 got = switch_buffer_read(tech_pvt->inject_buffer, inj, to_read);
             }
 
-            switch_mutex_unlock(tech_pvt->mutex);
-
+            /* Update stats under mutex to avoid data races */
             if (got < need) {
                 tech_pvt->inject_underruns++;
             }
+            tech_pvt->inject_write_calls++;
+            tech_pvt->inject_bytes += got;
+
+            /* Capture inject_buffer inuse while we still hold mutex */
+            const unsigned long inject_inuse_now = tech_pvt->inject_buffer ?
+                (unsigned long)switch_buffer_inuse(tech_pvt->inject_buffer) : 0;
+
+            switch_mutex_unlock(tech_pvt->mutex);
 
             if (got > 0) {
                 /* Always replace: copy inject audio then silence-pad the remainder */
@@ -124,33 +131,38 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
 
             switch_core_media_bug_set_write_replace_frame(bug, frame);
 
-            tech_pvt->inject_write_calls++;
-            tech_pvt->inject_bytes += got;
+            {
+                const switch_time_t now = switch_micro_time_now();
+                if (!tech_pvt->inject_last_report) tech_pvt->inject_last_report = now;
 
-            const switch_time_t now = switch_micro_time_now();
-            if (!tech_pvt->inject_last_report) tech_pvt->inject_last_report = now;
-            if ((now - tech_pvt->inject_last_report) > 1000000) {
-                const double loss_pct = tech_pvt->inject_write_calls ?
-                    (100.0 * (double)tech_pvt->inject_underruns / (double)tech_pvt->inject_write_calls) : 0.0;
+                /* Use configurable log interval (default 1000ms) */
+                const switch_time_t log_interval_us =
+                    (tech_pvt->cfg.inject_log_every_ms > 0 ? tech_pvt->cfg.inject_log_every_ms : 1000) * 1000LL;
 
-                switch_mutex_lock(tech_pvt->mutex);
-                const unsigned long inject_inuse_now = tech_pvt->inject_buffer ?
-                    (unsigned long)switch_buffer_inuse(tech_pvt->inject_buffer) : 0;
-                switch_mutex_unlock(tech_pvt->mutex);
+                if ((now - tech_pvt->inject_last_report) > log_interval_us) {
+                    switch_mutex_lock(tech_pvt->mutex);
+                    const uint64_t snap_calls = tech_pvt->inject_write_calls;
+                    const uint64_t snap_bytes = tech_pvt->inject_bytes;
+                    const uint64_t snap_under = tech_pvt->inject_underruns;
+                    tech_pvt->inject_write_calls = 0;
+                    tech_pvt->inject_bytes = 0;
+                    tech_pvt->inject_underruns = 0;
+                    switch_mutex_unlock(tech_pvt->mutex);
 
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),
-                                  SWITCH_LOG_INFO,
-                                  "(%s) PUSHBACK consume: write_calls=%llu bytes_read=%llu underruns=%llu loss%%=%.1f inject_inuse_now=%lu\n",
-                                  switch_core_session_get_uuid(session),
-                                  (unsigned long long)tech_pvt->inject_write_calls,
-                                  (unsigned long long)tech_pvt->inject_bytes,
-                                  (unsigned long long)tech_pvt->inject_underruns,
-                                  loss_pct,
-                                  inject_inuse_now);
-                tech_pvt->inject_last_report = now;
-                tech_pvt->inject_write_calls = 0;
-                tech_pvt->inject_bytes = 0;
-                tech_pvt->inject_underruns = 0;
+                    const double loss_pct = snap_calls ?
+                        (100.0 * (double)snap_under / (double)snap_calls) : 0.0;
+
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),
+                                      SWITCH_LOG_INFO,
+                                      "(%s) PUSHBACK consume: write_calls=%llu bytes_read=%llu underruns=%llu loss%%=%.1f inject_inuse_now=%lu\n",
+                                      switch_core_session_get_uuid(session),
+                                      (unsigned long long)snap_calls,
+                                      (unsigned long long)snap_bytes,
+                                      (unsigned long long)snap_under,
+                                      loss_pct,
+                                      inject_inuse_now);
+                    tech_pvt->inject_last_report = now;
+                }
             }
         }
         break;
@@ -184,7 +196,6 @@ static switch_status_t start_capture(switch_core_session_t *session,
     void *pUserData = NULL;
 
     int channels = (flags & SMBF_STEREO) ? 2 : 1;
-    (void)get_channel_var_int(session, "STREAM_FRAME_MS", 0);
 
     if (switch_channel_get_private(channel, MY_BUG_NAME)) {
         return SWITCH_STATUS_FALSE;
@@ -229,6 +240,8 @@ static switch_status_t start_capture(switch_core_session_t *session,
             flags,
             &bug
         ) != SWITCH_STATUS_SUCCESS) {
+        /* Clean up the AudioStreamer that stream_session_init created */
+        stream_session_cleanup(session, NULL, 0);
         return SWITCH_STATUS_FALSE;
     }
 
@@ -252,7 +265,7 @@ static switch_status_t send_text(switch_core_session_t *session, char* text)
 }
 
 #define STREAM_API_SYNTAX \
-"<uuid> start <ws-uri> [mono|mixed|stereo] [8000|16000] [metadata]"
+"<uuid> start <ws-uri> [mono|mixed|stereo] [8000|16000|24000|32000|48000] [metadata]"
 
 SWITCH_STANDARD_API(stream_function)
 {

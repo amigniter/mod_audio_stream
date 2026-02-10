@@ -91,11 +91,11 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
     fs_channels = _env_int("FS_CHANNELS", 1)
     fs_out_sample_rate = _env_int("FS_OUT_SAMPLE_RATE", 24000)
 
-    playout_prebuffer_ms = _env_int("PLAYOUT_PREBUFFER_MS", 250)
+    playout_prebuffer_ms = _env_int("PLAYOUT_PREBUFFER_MS", 100)
 
     force_commit_ms = _env_int("OPENAI_FORCE_COMMIT_MS", 0)
     force_response_on_commit = _env_bool("OPENAI_FORCE_RESPONSE_ON_COMMIT", False)
-    response_min_interval_ms = _env_int("RESPONSE_MIN_INTERVAL_MS", 400)
+    response_min_interval_ms = _env_int("RESPONSE_MIN_INTERVAL_MS", 200)
 
     fs_send_json_audio = _env_bool("FS_SEND_JSON_AUDIO", False)
     fs_send_json_handshake = _env_bool(
@@ -120,13 +120,17 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
 
     openai_wss_insecure = _env_bool("OPENAI_WSS_INSECURE", False)
 
-    # ── VAD tuning ──
+    # ── VAD tuning — critical for natural conversation flow ──
+    # Lower silence_duration = faster response, feels more human
+    # Higher prefix_padding = captures more word beginnings
     vad_threshold = _env_float("VAD_THRESHOLD", 0.5)
     vad_prefix_padding_ms = _env_int("VAD_PREFIX_PADDING_MS", 300)
-    vad_silence_duration_ms = _env_int("VAD_SILENCE_DURATION_MS", 500)
+    vad_silence_duration_ms = _env_int("VAD_SILENCE_DURATION_MS", 300)
 
     # ── AI behavior ──
-    temperature = _env_float("OPENAI_TEMPERATURE", 0.8)
+    # Lower temperature = more consistent, natural-sounding voice
+    # 0.6 is the sweet spot: natural variation without erratic changes
+    temperature = _env_float("OPENAI_TEMPERATURE", 0.6)
     system_instructions = os.getenv("OPENAI_SYSTEM_INSTRUCTIONS", "").strip()
 
     if fs_sample_rate != openai_input_sample_rate and not openai_resample_input:

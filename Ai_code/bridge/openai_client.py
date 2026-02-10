@@ -79,8 +79,8 @@ async def connect_openai_realtime(
                 **{key: headers},
             )
             break
-        except TypeError:
-            pass
+        except TypeError as e:
+            logger.debug("websockets.connect with %s=dict failed: %s", key, e)
 
     if ws is None:
         for key in ("extra_headers", "headers", "additional_headers"):
@@ -90,8 +90,8 @@ async def connect_openai_realtime(
                     **{key: list(headers.items())},
                 )
                 break
-            except TypeError:
-                pass
+            except TypeError as e:
+                logger.debug("websockets.connect with %s=list failed: %s", key, e)
 
     if ws is None:
         raise RuntimeError("Cannot pass headers to websockets — upgrade: pip install websockets>=12")
@@ -101,11 +101,21 @@ async def connect_openai_realtime(
     # This is THE key to matching ChatGPT Voice quality.
     # ChatGPT has all these tuned internally. We set them explicitly.
     #
+    # The system instructions MUST tell the model HOW to speak, not just
+    # what to say.  Without prosody/emotion guidance, the model defaults
+    # to a flat, robotic cadence.
+    #
     default_instructions = (
-        "You are a helpful, friendly voice assistant on a phone call. "
-        "Keep responses concise and conversational (1 to 3 sentences). "
-        "Speak naturally as if talking to a friend. "
-        "If the user's audio is unclear, ask them to repeat politely."
+        "You are a warm, friendly voice assistant on a phone call. "
+        "Speak exactly like a real human would — with natural rhythm, "
+        "pauses, emphasis, and emotion. Vary your tone and pacing. "
+        "Use contractions (I'm, you're, let's, can't) and casual filler "
+        "words (well, so, actually, hmm) when appropriate. "
+        "Keep responses concise: 1 to 3 sentences unless asked for detail. "
+        "Never sound like you're reading from a script. "
+        "If the user's audio is unclear, say something like 'Sorry, I didn't quite catch that — could you say that again?' "
+        "Match the user's energy — if they're excited, be excited back. "
+        "If they're calm, be calm and reassuring."
     )
 
     session_update = {

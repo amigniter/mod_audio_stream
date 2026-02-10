@@ -117,6 +117,11 @@ class InputAudioTracker:
     appended_since_commit_bytes: int = 0
     commits_sent: int = 0
     commits_acked: int = 0
+    item_audio_buf: bytearray = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.item_audio_buf is None:
+            self.item_audio_buf = bytearray()
 
     def on_appended(self, n: int) -> None:
         if n > 0:
@@ -186,9 +191,7 @@ async def pump_freeswitch_to_openai(
             cfg.fs_sample_rate, openai_in_rate, get_resample_backend(),
         )
 
-    use_item_mode = getattr(cfg, "openai_input_mode", "buffer") == "item"
-    if not hasattr(tracker, "item_audio_buf"):
-        setattr(tracker, "item_audio_buf", bytearray())
+    use_item_mode = cfg.openai_input_mode == "item"
 
     async for message in upstream_ws:
         if isinstance(message, (bytes, bytearray)):
@@ -210,10 +213,17 @@ async def pump_freeswitch_to_openai(
                 # Mono downmix if needed
                 if cfg.fs_channels != 1:
                     try:
-                        import audioop
+                        import warnings
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore", DeprecationWarning)
+                            import audioop
                         out_pcm = audioop.tomono(out_pcm, 2, 0.5, 0.5)
-                    except Exception:
-                        pass
+                    except ImportError:
+                        try:
+                            import audioop_lts as audioop  # type: ignore
+                            out_pcm = audioop.tomono(out_pcm, 2, 0.5, 0.5)
+                        except ImportError:
+                            logger.warning("audioop unavailable — cannot downmix stereo input")
 
                 # High-quality resample 8k->24k
                 if input_resampler is not None:
@@ -221,8 +231,12 @@ async def pump_freeswitch_to_openai(
 
                 out_pcm = ensure_even_bytes(out_pcm)
 
+                # Never send empty audio to OpenAI
+                if len(out_pcm) == 0:
+                    continue
+
                 if use_item_mode:
-                    getattr(tracker, "item_audio_buf").extend(out_pcm)
+                    tracker.item_audio_buf.extend(out_pcm)
                     tracker.on_appended(len(out_pcm))
                 else:
                     pkt = json.dumps({
@@ -292,7 +306,7 @@ async def pump_openai_to_freeswitch(
     user_text_buf: list[str] = []
     ai_text_buf: list[str] = []
 
-    item_max_buffer_ms = int(getattr(cfg, "openai_item_max_buffer_ms", 20000))
+    item_max_buffer_ms = cfg.openai_item_max_buffer_ms
     openai_in_rate = cfg.openai_input_sample_rate
     item_max_bytes = frame_bytes(openai_in_rate, 1, item_max_buffer_ms) if item_max_buffer_ms > 0 else 0
 
@@ -311,7 +325,7 @@ async def pump_openai_to_freeswitch(
         item_turn_in_flight = True
         last_item_turn_end_t = now
 
-        audio_buf = getattr(tracker, "item_audio_buf", None)
+        audio_buf = tracker.item_audio_buf
         if not isinstance(audio_buf, (bytearray, bytes)) or len(audio_buf) == 0:
             return
 
@@ -320,8 +334,7 @@ async def pump_openai_to_freeswitch(
             if isinstance(audio_buf, bytearray):
                 del audio_buf[:drop]
             else:
-                audio_buf = audio_buf[drop:]
-                setattr(tracker, "item_audio_buf", bytearray(audio_buf))
+                tracker.item_audio_buf = bytearray(audio_buf[drop:])
 
         b64_audio = base64.b64encode(bytes(audio_buf)).decode("ascii")
         item_evt = {
@@ -351,7 +364,7 @@ async def pump_openai_to_freeswitch(
         if isinstance(audio_buf, bytearray):
             del audio_buf[:len(local_audio)]
         else:
-            setattr(tracker, "item_audio_buf", bytearray())
+            tracker.item_audio_buf = bytearray()
         tracker.on_committed()
 
         if not _can_create_response():
@@ -387,7 +400,7 @@ async def pump_openai_to_freeswitch(
     #
     #  Exactly 1 frame per 20ms tick. No multi-drain. No bursts.
     #  JitterBuffer is unbounded so audio is NEVER dropped.
-    #  This is identical to echo_server.py (proven perfect).
+    #  Silence frames fill underruns for smooth audio.
     # ─────────────────────────────────────────────────────────────
     async def _playout_loop() -> None:
         step_s = contract.frame_ms / 1000.0  # 0.020
@@ -398,12 +411,31 @@ async def pump_openai_to_freeswitch(
         last_stats_sent = 0
         last_stats_underruns = 0
 
+        # Pre-generate a silence frame for underrun fill
+        # This prevents gaps/pops when buffer momentarily empties
+        silence_frame = b"\x00" * out_frame_bytes
+
+        # Prebuffer timeout — never wait more than 5s for first audio.
+        # If OpenAI is slow to respond, start playout anyway (silence fill
+        # handles the gap gracefully instead of hanging forever).
+        PREBUFFER_TIMEOUT_S = 5.0
+
         # Wait for first audio before starting clock
+        prebuffer_start = time.monotonic()
         if prebuffer_bytes > 0:
             while jbuf.buffered_bytes < prebuffer_bytes:
+                if time.monotonic() - prebuffer_start > PREBUFFER_TIMEOUT_S:
+                    logger.warning(
+                        "Prebuffer timeout (%.1fs) — starting playout with %d/%d bytes",
+                        PREBUFFER_TIMEOUT_S, jbuf.buffered_bytes, prebuffer_bytes,
+                    )
+                    break
                 await asyncio.sleep(0.005)
         else:
             while jbuf.buffered_frames == 0:
+                if time.monotonic() - prebuffer_start > PREBUFFER_TIMEOUT_S:
+                    logger.warning("Prebuffer timeout — no audio received, starting anyway")
+                    break
                 await asyncio.sleep(0.005)
 
         # Clock starts NOW
@@ -438,7 +470,18 @@ async def pump_openai_to_freeswitch(
                     await upstream_ws.send(payload)
                     frames_sent += 1
                 else:
+                    # Underrun: send silence frame to prevent audio gaps/pops.
+                    # The caller hears smooth silence instead of choppy artifacts.
                     underruns += 1
+                    if cfg.fs_send_json_audio:
+                        payload = fs_stream_audio_json(
+                            silence_frame, contract,
+                            sample_rate_override=openai_out_rate,
+                            channels_override=openai_out_channels,
+                        )
+                    else:
+                        payload = silence_frame
+                    await upstream_ws.send(payload)
 
                 # Stats every 5s
                 now_s = time.monotonic()
@@ -560,10 +603,17 @@ async def pump_openai_to_freeswitch(
                     src_ch = int(evt["channels"])
                 if src_ch != 1:
                     try:
-                        import audioop
+                        import warnings
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore", DeprecationWarning)
+                            import audioop
                         pcm = audioop.tomono(pcm, 2, 0.5, 0.5)
-                    except Exception:
-                        pcm = ensure_even_bytes(pcm)
+                    except ImportError:
+                        try:
+                            import audioop_lts as audioop  # type: ignore
+                            pcm = audioop.tomono(pcm, 2, 0.5, 0.5)
+                        except ImportError:
+                            pcm = ensure_even_bytes(pcm)
 
                 jbuf.enqueue_pcm(pcm)
                 continue
@@ -576,7 +626,7 @@ async def pump_openai_to_freeswitch(
                 "input_audio_buffer.vad_stop",
             ):
                 logger.info("Turn end (%s)", evt_type)
-                if getattr(cfg, "openai_input_mode", "buffer") == "item":
+                if cfg.openai_input_mode == "item":
                     await _send_item_audio_and_respond(f"server_vad:{evt_type}")
                 else:
                     tracker.on_committed()
@@ -592,7 +642,27 @@ async def pump_openai_to_freeswitch(
                 cleared = jbuf.clear()
                 if cleared > 0:
                     cleared_ms = (cleared / out_frame_bytes) * contract.frame_ms if out_frame_bytes > 0 else 0
-                    logger.info("Barge-in: cleared %d bytes (%.0f ms)", cleared, cleared_ms)
+                    logger.info("Barge-in: cleared %d bytes (%.0f ms) from jitter buffer", cleared, cleared_ms)
+
+                # Also tell the C module to flush its inject_buffer.
+                # Send a "clear" command as a JSON text frame so the
+                # caller immediately stops hearing stale AI audio.
+                try:
+                    clear_cmd = json.dumps({
+                        "type": "streamAudio",
+                        "data": {
+                            "audioDataType": "raw",
+                            "audioData": "",
+                            "sampleRate": openai_out_rate,
+                            "channels": openai_out_channels,
+                            "clear": True,
+                        },
+                    })
+                    await upstream_ws.send(clear_cmd)
+                    logger.debug("Barge-in: sent clear command to C module")
+                except Exception:
+                    logger.debug("Failed to send clear command to C module")
+
                 # Cancel in-flight response
                 if response_in_flight:
                     try:
@@ -722,5 +792,18 @@ async def run_server(cfg: BridgeConfig) -> None:
             logger.exception("Bridge error")
 
     logger.info("Listening on ws://%s:%d", cfg.host, cfg.port)
+    stop_event = asyncio.Event()
+
+    # Graceful shutdown on SIGINT/SIGTERM
+    import signal
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop_event.set)
+        except (NotImplementedError, OSError):
+            pass  # Windows doesn't support add_signal_handler
+
     async with websockets.serve(_handler, cfg.host, cfg.port, max_size=16 * 1024 * 1024):
-        await asyncio.Future()
+        logger.info("Server ready — press Ctrl+C to stop")
+        await stop_event.wait()
+        logger.info("Shutting down gracefully...")

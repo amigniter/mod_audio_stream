@@ -95,28 +95,12 @@ class Resampler:
             return
 
         if self._backend == "soxr":
-            # soxr.ResampleStream for stateful streaming
-            try:
-                self._state = _soxr.ResampleStream(
-                    in_rate, out_rate,
-                    num_channels=channels,
-                    dtype="int16",
-                )
-                logger.info(
-                    "Resampler: soxr %d->%d Hz (sinc/broadcast quality)",
-                    in_rate, out_rate,
-                )
-                return
-            except Exception as exc:
-                logger.warning("soxr.ResampleStream failed: %s — trying block mode", exc)
-                # Fall through to block mode
-                self._state = None
-
-        if self._backend == "soxr" and self._state is None:
-            # Block mode fallback (no state, but still high quality)
+            # soxr.ResampleStream needs large chunks to produce output.
+            # For small 20ms frames (160 samples) it buffers internally
+            # and returns EMPTY — use block mode instead which always works.
             self._backend = "soxr_block"
             logger.info(
-                "Resampler: soxr block mode %d->%d Hz",
+                "Resampler: soxr block %d->%d Hz (sinc/broadcast quality)",
                 in_rate, out_rate,
             )
             return
@@ -158,9 +142,6 @@ class Resampler:
         if self._backend == "passthrough":
             return pcm
 
-        if self._backend == "soxr":
-            return self._process_soxr_stream(pcm)
-
         if self._backend == "soxr_block":
             return self._process_soxr_block(pcm)
 
@@ -172,15 +153,7 @@ class Resampler:
 
         return pcm
 
-    # ── soxr streaming (stateful, best quality) ──
-    def _process_soxr_stream(self, pcm: bytes) -> bytes:
-        arr = _np.frombuffer(pcm, dtype=_np.int16)
-        if self.channels > 1:
-            arr = arr.reshape(-1, self.channels)
-        out = self._state.resample_chunk(arr)  # type: ignore
-        return out.astype(_np.int16).tobytes()
-
-    # ── soxr block mode (stateless, still high quality) ──
+    # ── soxr block mode (stateless, broadcast quality) ──
     def _process_soxr_block(self, pcm: bytes) -> bytes:
         arr = _np.frombuffer(pcm, dtype=_np.int16)
         if self.channels > 1:
