@@ -54,7 +54,6 @@ def _log_config(cfg) -> None:
 def main() -> None:
     setup_logging()
     cfg = load_config()
-    # Use bridge logger namespace so it's visible alongside the rest of the bridge logs.
     logging.getLogger("bridge").info("=== mod-audio-stream bridge starting (config dump below, secrets masked) ===")
     _log_config(cfg)
     asyncio.run(run_server(cfg))

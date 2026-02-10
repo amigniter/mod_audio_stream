@@ -1,8 +1,11 @@
 from __future__ import annotations
 from dataclasses import dataclass
+import logging
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 
 def _env_int(key: str, default: int) -> int:
@@ -13,6 +16,16 @@ def _env_int(key: str, default: int) -> int:
         return int(v)
     except Exception as e:
         raise ValueError(f"{key} must be an int, got {v!r}") from e
+
+
+def _env_float(key: str, default: float) -> float:
+    v = os.getenv(key)
+    if v is None or str(v).strip() == "":
+        return default
+    try:
+        return float(v)
+    except Exception as e:
+        raise ValueError(f"{key} must be a float, got {v!r}") from e
 
 
 def _env_bool(key: str, default: bool = False) -> bool:
@@ -34,11 +47,6 @@ class BridgeConfig:
     fs_channels: int
     fs_out_sample_rate: int
     playout_prebuffer_ms: int
-    playout_max_buffer_ms: int
-    playout_catchup_max_ms: int
-    playout_sleep_granularity_ms: int
-    playout_target_buffer_ms: int
-    playout_max_drain_frames: int
     force_commit_ms: int
     force_response_on_commit: bool
     response_min_interval_ms: int
@@ -51,7 +59,11 @@ class BridgeConfig:
     openai_item_max_buffer_ms: int
     wss_pem: str
     openai_wss_insecure: bool
-    send_test_tone_on_connect: bool
+    vad_threshold: float
+    vad_prefix_padding_ms: int
+    vad_silence_duration_ms: int
+    temperature: float
+    system_instructions: str
 
 
 def load_config(env_file: str | None = None) -> BridgeConfig:
@@ -75,23 +87,11 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
     voice = os.getenv("OPENAI_REALTIME_VOICE", "alloy").strip()
 
     fs_frame_ms = _env_int("FS_FRAME_MS", 20)
-    fs_sample_rate = _env_int("FS_SAMPLE_RATE", 16000)
+    fs_sample_rate = _env_int("FS_SAMPLE_RATE", 8000)
     fs_channels = _env_int("FS_CHANNELS", 1)
+    fs_out_sample_rate = _env_int("FS_OUT_SAMPLE_RATE", 24000)
 
-    fs_out_sample_rate = _env_int("FS_OUT_SAMPLE_RATE", fs_sample_rate)
-
-    # OpenAI output audio tends to arrive in bursts. A larger prebuffer helps eliminate underruns
-    # at the cost of some added latency.
     playout_prebuffer_ms = _env_int("PLAYOUT_PREBUFFER_MS", 250)
-    playout_max_buffer_ms = _env_int("PLAYOUT_MAX_BUFFER_MS", 2500)
-    playout_catchup_max_ms = _env_int("PLAYOUT_CATCHUP_MAX_MS", 120)
-    playout_sleep_granularity_ms = _env_int("PLAYOUT_SLEEP_GRANULARITY_MS", 2)
-
-    # Adaptive playout: keep a steady buffer to smooth bursty output.
-    # Defaults are conservative and can be tuned per deployment.
-    playout_target_buffer_ms = _env_int("PLAYOUT_TARGET_BUFFER_MS", 800)
-    # Keep for compatibility; app.py currently avoids draining faster than real-time.
-    playout_max_drain_frames = _env_int("PLAYOUT_MAX_DRAIN_FRAMES", 2)
 
     force_commit_ms = _env_int("OPENAI_FORCE_COMMIT_MS", 0)
     force_response_on_commit = _env_bool("OPENAI_FORCE_RESPONSE_ON_COMMIT", False)
@@ -103,22 +103,15 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
         True if fs_send_json_audio else False,
     )
 
-    # OpenAI input side: OpenAI Realtime API always expects 24kHz PCM16 mono.
     openai_input_sample_rate = _env_int("OPENAI_INPUT_SAMPLE_RATE", 24000)
-    openai_resample_input = _env_bool("OPENAI_RESAMPLE_INPUT", False)
+    openai_resample_input = _env_bool("OPENAI_RESAMPLE_INPUT", True)
 
-    # OpenAI output side: Realtime API always outputs 24kHz PCM16 mono.
-    # The C++ mod (SpeexDSP) resamples from this rate to FS session rate on injection.
     openai_output_sample_rate = _env_int("OPENAI_OUTPUT_SAMPLE_RATE", 24000)
 
-    # Input mode:
-    # - "buffer": input_audio_buffer.append + commit (legacy and can hit commit_empty)
-    # - "item":   conversation.item.create with input_audio (more reliable for SIP bridges)
     openai_input_mode = os.getenv("OPENAI_INPUT_MODE", "buffer").strip().lower() or "buffer"
     if openai_input_mode not in ("buffer", "item"):
         raise ValueError("OPENAI_INPUT_MODE must be 'buffer' or 'item'")
 
-    # Item-mode safety: cap how much audio we keep locally while waiting for VAD.
     openai_item_max_buffer_ms = _env_int("OPENAI_ITEM_MAX_BUFFER_MS", 20000)
 
     wss_pem = os.getenv("WSS_PEM", "").strip().strip('"').strip("'")
@@ -127,7 +120,35 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
 
     openai_wss_insecure = _env_bool("OPENAI_WSS_INSECURE", False)
 
-    send_test_tone_on_connect = _env_bool("SEND_TEST_TONE", False)
+    # ── VAD tuning ──
+    vad_threshold = _env_float("VAD_THRESHOLD", 0.5)
+    vad_prefix_padding_ms = _env_int("VAD_PREFIX_PADDING_MS", 300)
+    vad_silence_duration_ms = _env_int("VAD_SILENCE_DURATION_MS", 500)
+
+    # ── AI behavior ──
+    temperature = _env_float("OPENAI_TEMPERATURE", 0.8)
+    system_instructions = os.getenv("OPENAI_SYSTEM_INSTRUCTIONS", "").strip()
+
+    if fs_sample_rate != openai_input_sample_rate and not openai_resample_input:
+        logger.warning(
+            "FS_SAMPLE_RATE=%d != OPENAI_INPUT_SAMPLE_RATE=%d but OPENAI_RESAMPLE_INPUT is off. "
+            "Audio sent to OpenAI will be at the wrong rate. Set OPENAI_RESAMPLE_INPUT=1.",
+            fs_sample_rate,
+            openai_input_sample_rate,
+        )
+    if fs_out_sample_rate == fs_sample_rate and openai_output_sample_rate != fs_sample_rate:
+        logger.warning(
+            "FS_OUT_SAMPLE_RATE=%d equals FS_SAMPLE_RATE=%d but OpenAI outputs %d Hz. "
+            "The C module resampler will need to handle %d→%d conversion. "
+            "If the C module expects 24 kHz input, set FS_OUT_SAMPLE_RATE=24000.",
+            fs_out_sample_rate,
+            fs_sample_rate,
+            openai_output_sample_rate,
+            openai_output_sample_rate,
+            fs_sample_rate,
+        )
+    if fs_sample_rate not in (8000, 16000, 24000, 32000, 44100, 48000):
+        logger.warning("Unusual FS_SAMPLE_RATE=%d — verify this matches your FreeSWITCH codec.", fs_sample_rate)
 
     return BridgeConfig(
         host=host,
@@ -140,11 +161,6 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
         fs_channels=fs_channels,
         fs_out_sample_rate=fs_out_sample_rate,
         playout_prebuffer_ms=playout_prebuffer_ms,
-        playout_max_buffer_ms=playout_max_buffer_ms,
-        playout_catchup_max_ms=playout_catchup_max_ms,
-        playout_sleep_granularity_ms=playout_sleep_granularity_ms,
-        playout_target_buffer_ms=playout_target_buffer_ms,
-        playout_max_drain_frames=playout_max_drain_frames,
         force_commit_ms=force_commit_ms,
         force_response_on_commit=force_response_on_commit,
         response_min_interval_ms=response_min_interval_ms,
@@ -157,5 +173,9 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
         openai_item_max_buffer_ms=openai_item_max_buffer_ms,
         wss_pem=wss_pem,
         openai_wss_insecure=openai_wss_insecure,
-        send_test_tone_on_connect=send_test_tone_on_connect,
+        vad_threshold=vad_threshold,
+        vad_prefix_padding_ms=vad_prefix_padding_ms,
+        vad_silence_duration_ms=vad_silence_duration_ms,
+        temperature=temperature,
+        system_instructions=system_instructions,
     )

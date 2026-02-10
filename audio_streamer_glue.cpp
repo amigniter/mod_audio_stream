@@ -16,9 +16,6 @@
 #include <algorithm>
 #include <climits>
 #include <cstdint>
-
-/* Some FreeSWITCH builds don't expose switch_safe_free; cJSON_PrintUnformatted returns malloc'd memory.
-   Use plain free() here to keep ownership correct across platforms. */
 #include <cstdlib>
 
 static inline void mod_audio_stream_free_json(char* p) {
@@ -27,7 +24,7 @@ static inline void mod_audio_stream_free_json(char* p) {
     }
 }
 
-#define MOD_AUDIO_STREAM_VERSION "1.1.0"
+#define MOD_AUDIO_STREAM_VERSION "1.2.0"
 #define FRAME_SIZE_8000  320 
 #define INJECT_BUFFER_MS_DEFAULT 5000
 #define MAX_AUDIO_BASE64_LEN (4 * 1024 * 1024) 
@@ -36,6 +33,46 @@ static inline void mod_audio_stream_free_json(char* p) {
 #define STREAM_INJECT_LOG_EVERY_MS_DEFAULT 1000
 #define STREAM_RECONNECT_MAX_DEFAULT 0
 #define STREAM_MAX_QUEUE_MS_DEFAULT 0
+#define FILE_INJECT_MAX_SIZE (16 * 1024 * 1024)
+
+static inline size_t pcm16_bytes_per_ms(int sampleRate, int channels) {
+    if (sampleRate <= 0 || channels <= 0) return 0;
+    return (size_t)sampleRate * 2u * (size_t)channels / 1000u;
+}
+
+static inline void drop_oldest_from_buffer(switch_buffer_t* buf, switch_size_t bytes) {
+    if (!buf || bytes == 0) return;
+    uint8_t temp[SWITCH_RECOMMENDED_BUFFER_SIZE];
+    size_t remaining = (size_t)bytes;
+    while (remaining > 0) {
+        size_t toread = remaining > sizeof(temp) ? sizeof(temp) : remaining;
+        switch_buffer_read(buf, temp, (switch_size_t)toread);
+        remaining -= toread;
+    }
+}
+
+static inline bool host_is_little_endian() {
+    const uint16_t x = 1;
+    return *((const uint8_t*)&x) == 1;
+}
+
+static inline void byteswap_inplace_16(std::string& s) {
+    const size_t n = s.size() & ~size_t(1);
+    for (size_t i = 0; i < n; i += 2) {
+        std::swap(s[i], s[i + 1]);
+    }
+}
+
+static inline bool is_safe_file_path(const char* path) {
+    if (!path || !*path) return false;
+    if (strstr(path, "..") != nullptr) return false;
+    if (path[0] != '/') return false;
+    if (strncmp(path, "/etc/", 5) == 0) return false;
+    if (strncmp(path, "/proc/", 6) == 0) return false;
+    if (strncmp(path, "/sys/", 5) == 0) return false;
+    if (strncmp(path, "/dev/", 5) == 0) return false;
+    return true;
+}
 
 class AudioStreamer {
 public:
@@ -116,13 +153,13 @@ private:
         bool suppressLog, const char* extra_headers, const char* tls_cafile, const char* tls_keyfile, 
         const char* tls_certfile, bool tls_disable_hostname_validation
     ) : m_sessionId(uuid), m_notify(callback), m_suppress_log(suppressLog), 
-        m_extra_headers(extra_headers), m_playFile(0) {
+        m_extra_headers(extra_headers ? extra_headers : ""), m_playFile(0) {
 
         WebSocketHeaders hdrs;
         WebSocketTLSOptions tls;
 
-        if (m_extra_headers) {
-            cJSON *headers_json = cJSON_Parse(m_extra_headers);
+        if (!m_extra_headers.empty()) {
+            cJSON *headers_json = cJSON_Parse(m_extra_headers.c_str());
             if (headers_json) {
                 cJSON *iterator = headers_json->child;
                 while (iterator) {
@@ -249,7 +286,9 @@ private:
         auto *bug = get_media_bug(session);
         if(bug) {
             auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
-            tech_pvt->close_requested = SWITCH_TRUE;
+            if (tech_pvt) {
+                tech_pvt->close_requested = SWITCH_TRUE;
+            }
             switch_core_media_bug_close(&bug, SWITCH_FALSE);
         }
     }
@@ -339,23 +378,6 @@ private:
     }
 
 
-    static inline size_t pcm16_bytes_per_ms(int sampleRate, int channels) {
-        if (sampleRate <= 0 || channels <= 0) return 0;
-        return (size_t)sampleRate * 2u * (size_t)channels / 1000u;
-    }
-
-    static inline bool host_is_little_endian() {
-        const uint16_t x = 1;
-        return *((const uint8_t*)&x) == 1;
-    }
-
-    static inline void byteswap_inplace_16(std::string& s) {
-        const size_t n = s.size() & ~size_t(1);
-        for (size_t i = 0; i < n; i += 2) {
-            std::swap(s[i], s[i + 1]);
-        }
-    }
-
     static inline std::string downmix_stereo_to_mono_pcm16le(const uint8_t* in, size_t in_bytes) {
        
         const size_t frames = (in_bytes / 4);
@@ -420,19 +442,6 @@ private:
         return std::string((const char*)out.data(), (const char*)out.data() + out_bytes);
     }
 
-    static inline void drop_oldest_from_buffer(switch_buffer_t* buf, switch_size_t bytes) {
-        if (!buf || bytes == 0) return;
-        /* Read and discard in chunks using stack/session scratch to avoid heap allocations */
-        size_t remaining = (size_t)bytes;
-        const size_t chunk = SWITCH_RECOMMENDED_BUFFER_SIZE;
-        uint8_t temp[SWITCH_RECOMMENDED_BUFFER_SIZE];
-        while (remaining > 0) {
-            size_t toread = remaining > chunk ? chunk : remaining;
-            switch_buffer_read(buf, temp, (switch_size_t)toread);
-            remaining -= toread;
-        }
-    }
-
     ProcessResult processMessage(switch_core_session_t* psession, const std::string& message) {
         ProcessResult out;
 
@@ -490,8 +499,8 @@ private:
             {
                 switch_media_bug_t* bug2 = get_media_bug(psession);
                 auto* pvt2 = bug2 ? (private_t*) switch_core_media_bug_get_user_data(bug2) : nullptr;
-                if (pvt2 && pvt2->max_audio_base64_len > 0) {
-                    max_b64 = (size_t)pvt2->max_audio_base64_len;
+                if (pvt2 && pvt2->cfg.max_audio_base64_len > 0) {
+                    max_b64 = (size_t)pvt2->cfg.max_audio_base64_len;
                 }
             }
 
@@ -517,7 +526,7 @@ private:
                 {
                     switch_media_bug_t* bug2 = get_media_bug(psession);
                     auto* pvt2 = bug2 ? (private_t*) switch_core_media_bug_get_user_data(bug2) : nullptr;
-                    if (!pvt2 || !pvt2->allow_file_injection) {
+                    if (!pvt2 || !pvt2->cfg.allow_file_injection) {
                         push_err(out, m_sessionId, "processMessage - file injection disabled");
                         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
                                           "(%s) processMessage - file injection disabled (set STREAM_ALLOW_FILE_INJECTION=true to enable)\n",
@@ -527,20 +536,41 @@ private:
                 }
 
                 const char* filepath = jsonFile->valuestring;
+
+                if (!is_safe_file_path(filepath)) {
+                    push_err(out, m_sessionId, "processMessage - file path rejected by security check: " + std::string(filepath));
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
+                                      "(%s) processMessage - file path rejected: %s\n", m_sessionId.c_str(), filepath);
+                    return out;
+                }
+
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
                                   "(%s) processMessage: attempting to read file payload %s\n",
                                   m_sessionId.c_str(), filepath);
 
-                std::ifstream ifs(filepath, std::ios::binary);
+                std::ifstream ifs(filepath, std::ios::binary | std::ios::ate);
                 if (!ifs) {
                     push_err(out, m_sessionId, "processMessage - cannot open file: " + std::string(filepath));
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
                                       "(%s) processMessage - cannot open file: %s\n", m_sessionId.c_str(), filepath);
                     return out;
                 }
-                std::ostringstream ss;
-                ss << ifs.rdbuf();
-                decoded = ss.str();
+                const auto file_size = ifs.tellg();
+                if (file_size < 0 || (size_t)file_size > (size_t)FILE_INJECT_MAX_SIZE) {
+                    push_err(out, m_sessionId, "processMessage - file too large for injection");
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
+                                      "(%s) processMessage - file too large: %s (%lld bytes, max=%d)\n",
+                                      m_sessionId.c_str(), filepath, (long long)file_size, FILE_INJECT_MAX_SIZE);
+                    return out;
+                }
+                ifs.seekg(0, std::ios::beg);
+                decoded.resize((size_t)file_size);
+                if (!ifs.read(&decoded[0], file_size)) {
+                    push_err(out, m_sessionId, "processMessage - failed to read file: " + std::string(filepath));
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
+                                      "(%s) processMessage - read failed: %s\n", m_sessionId.c_str(), filepath);
+                    return out;
+                }
                 decoded_from_file = true;
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
                                   "(%s) processMessage: read file %s size=%zu\n",
@@ -670,8 +700,6 @@ private:
                 }
             }
 
-            /* IMPORTANT: keep the mutex held while using inject_resampler to avoid a
-               use-after-free if cleanup destroys it concurrently. */
             decoded = resample_pcm16le_speex((const uint8_t*)decoded.data(), decoded.size(), out_channels,
                                             sampleRate, out_sr, tech_pvt->inject_resampler);
 
@@ -764,7 +792,7 @@ private:
     responseHandler_t m_notify;
     WebSocketClient client;
     bool m_suppress_log;
-    const char* m_extra_headers;
+    std::string m_extra_headers;
     int m_playFile;
     std::unordered_set<std::string> m_Files;
     std::atomic<bool> m_cleanedUp{false};
@@ -774,33 +802,16 @@ private:
 
 namespace {
 
-    static inline size_t pcm16_bytes_per_ms(int sampleRate, int channels) {
-        if (sampleRate <= 0 || channels <= 0) return 0;
-        return (size_t)sampleRate * 2u * (size_t)channels / 1000u;
-    }
-
-    static inline void drop_oldest_from_buffer(switch_buffer_t* buf, switch_size_t bytes) {
-        if (!buf || bytes == 0) return;
-        /* Read-and-discard using a stack buffer to avoid heap allocation in hot path. */
-        uint8_t temp[SWITCH_RECOMMENDED_BUFFER_SIZE];
-        size_t remaining = (size_t)bytes;
-        while (remaining > 0) {
-            size_t toread = remaining > sizeof(temp) ? sizeof(temp) : remaining;
-            switch_buffer_read(buf, temp, (switch_size_t)toread);
-            remaining -= toread;
-        }
-    }
-
     static inline void enforce_max_queue_ms(private_t* tech_pvt, switch_buffer_t* sbuffer,
                                            int samples_per_second, int channels) {
         if (!tech_pvt || !sbuffer) return;
-        if (tech_pvt->max_queue_ms <= 0) return;
+        if (tech_pvt->cfg.max_queue_ms <= 0) return;
         if (samples_per_second <= 0 || channels <= 0) return;
 
         const size_t bytes_per_ms = pcm16_bytes_per_ms(samples_per_second, channels);
         if (bytes_per_ms == 0) return;
 
-        const size_t cap_bytes = bytes_per_ms * (size_t)tech_pvt->max_queue_ms;
+        const size_t cap_bytes = bytes_per_ms * (size_t)tech_pvt->cfg.max_queue_ms;
         const size_t inuse = (size_t)switch_buffer_inuse(sbuffer);
         if (inuse <= cap_bytes) return;
 
@@ -831,29 +842,11 @@ namespace {
               "(%s) mod_audio_stream build version %s running\n",
               _uuid_log, MOD_AUDIO_STREAM_VERSION);
 
-          /* stream_session_init may pre-populate per-call tuning fields from channel variables.
-              Preserve them across memset() since stream_data_init resets the struct. */
-          const int saved_frame_ms = tech_pvt->frame_ms;
-          const int saved_inject_buffer_ms = tech_pvt->inject_buffer_ms;
-          const int saved_inject_min_buffer_ms = tech_pvt->inject_min_buffer_ms;
-          const int saved_inject_log_every_ms = tech_pvt->inject_log_every_ms;
-          const int saved_allow_file_injection = tech_pvt->allow_file_injection;
-          const int saved_max_audio_base64_len = tech_pvt->max_audio_base64_len;
-          const int saved_debug_json = tech_pvt->debug_json;
-          const int saved_reconnect_max = tech_pvt->reconnect_max;
-          const int saved_max_queue_ms = tech_pvt->max_queue_ms;
+          const private_data_config_t saved_cfg = tech_pvt->cfg;
 
           memset(tech_pvt, 0, sizeof(private_t));
 
-          tech_pvt->frame_ms = saved_frame_ms;
-          tech_pvt->inject_buffer_ms = saved_inject_buffer_ms;
-          tech_pvt->inject_min_buffer_ms = saved_inject_min_buffer_ms;
-          tech_pvt->inject_log_every_ms = saved_inject_log_every_ms;
-          tech_pvt->allow_file_injection = saved_allow_file_injection;
-          tech_pvt->max_audio_base64_len = saved_max_audio_base64_len;
-          tech_pvt->debug_json = saved_debug_json;
-          tech_pvt->reconnect_max = saved_reconnect_max;
-          tech_pvt->max_queue_ms = saved_max_queue_ms;
+          tech_pvt->cfg = saved_cfg;
 
     strncpy(tech_pvt->sessionId, switch_core_session_get_uuid(session), MAX_SESSION_ID);
     tech_pvt->sessionId[MAX_SESSION_ID - 1] = '\0';
@@ -889,7 +882,7 @@ namespace {
         tech_pvt->inject_sample_rate = desiredSampling;
         tech_pvt->inject_bytes_per_sample = 2; 
         const size_t inject_bytes_per_ms = pcm16_bytes_per_ms(desiredSampling, channels);
-        const int inject_ms = (tech_pvt->inject_buffer_ms > 0) ? tech_pvt->inject_buffer_ms : INJECT_BUFFER_MS_DEFAULT;
+        const int inject_ms = (tech_pvt->cfg.inject_buffer_ms > 0) ? tech_pvt->cfg.inject_buffer_ms : INJECT_BUFFER_MS_DEFAULT;
         const size_t inject_buflen = std::max<size_t>(inject_bytes_per_ms * (size_t)inject_ms, 3200u);
         if (switch_buffer_create(pool, &tech_pvt->inject_buffer, inject_buflen) != SWITCH_STATUS_SUCCESS) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
@@ -905,8 +898,6 @@ namespace {
             return SWITCH_STATUS_FALSE;
         }
 
-        /* Pre-allocate inject_scratch so the WRITE_REPLACE hot path never needs to allocate.
-           Size it for a typical 20ms frame at 8kHz stereo (the maximum FS frame size). */
         {
             const size_t init_inject_scratch = FRAME_SIZE_8000 * channels;
             tech_pvt->inject_scratch = (uint8_t*) switch_core_session_alloc(session, init_inject_scratch);
@@ -921,11 +912,11 @@ namespace {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
                           "(%s) stream_data_init: frame_ms=%d inject_buffer_ms=%d inject_buflen=%zu max_queue_ms=%d reconnect_max=%d\n",
                           _uuid_log,
-                          tech_pvt->frame_ms > 0 ? tech_pvt->frame_ms : STREAM_FRAME_MS_DEFAULT,
+                          tech_pvt->cfg.frame_ms > 0 ? tech_pvt->cfg.frame_ms : STREAM_FRAME_MS_DEFAULT,
                           inject_ms,
                           inject_buflen,
-                          tech_pvt->max_queue_ms,
-                          tech_pvt->reconnect_max);
+                          tech_pvt->cfg.max_queue_ms,
+                          tech_pvt->cfg.reconnect_max);
 
         auto sp = AudioStreamer::create(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat,
                                         suppressLog, extra_headers, tls_cafile, tls_keyfile,
@@ -978,16 +969,13 @@ namespace {
 
 extern "C" {
     int validate_ws_uri(const char* url, char* wsUri) {
-        const char* scheme = nullptr;
         const char* hostStart = nullptr;
         const char* hostEnd = nullptr;
         const char* portStart = nullptr;
 
         if (strncmp(url, "ws://", 5) == 0) {
-            scheme = "ws";
             hostStart = url + 5;
         } else if (strncmp(url, "wss://", 6) == 0) {
-            scheme = "wss";
             hostStart = url + 6;
         } else {
             return 0;
@@ -1222,15 +1210,15 @@ extern "C" {
 
         {
             memset(tech_pvt, 0, sizeof(*tech_pvt));
-            tech_pvt->frame_ms = frame_ms;
-            tech_pvt->inject_buffer_ms = inject_buffer_ms;
-            tech_pvt->inject_min_buffer_ms = inject_min_buffer_ms;
-            tech_pvt->inject_log_every_ms = inject_log_every_ms;
-            tech_pvt->allow_file_injection = allow_file_injection;
-            tech_pvt->debug_json = debug_json;
-            tech_pvt->max_audio_base64_len = max_audio_base64_len;
-            tech_pvt->reconnect_max = reconnect_max;
-            tech_pvt->max_queue_ms = max_queue_ms;
+            tech_pvt->cfg.frame_ms = frame_ms;
+            tech_pvt->cfg.inject_buffer_ms = inject_buffer_ms;
+            tech_pvt->cfg.inject_min_buffer_ms = inject_min_buffer_ms;
+            tech_pvt->cfg.inject_log_every_ms = inject_log_every_ms;
+            tech_pvt->cfg.allow_file_injection = allow_file_injection;
+            tech_pvt->cfg.debug_json = debug_json;
+            tech_pvt->cfg.max_audio_base64_len = max_audio_base64_len;
+            tech_pvt->cfg.reconnect_max = reconnect_max;
+            tech_pvt->cfg.max_queue_ms = max_queue_ms;
         }
 
         if (SWITCH_STATUS_SUCCESS != stream_data_init(tech_pvt, session, wsUri, samples_per_second, sampling, channels, 
@@ -1252,8 +1240,6 @@ extern "C" {
         
           std::shared_ptr<AudioStreamer> streamer;
 
-          /* Avoid heap allocations in hot path: use per-session read_scratch and sbuffer
-              for temporary I/O and send directly to websocket without building vectors. */
           SpeexResamplerState *resampler = nullptr;
           int channels = 1;
           int rtp_packets = 1;
@@ -1294,15 +1280,12 @@ extern "C" {
                 if (!frame.datalen) continue;
 
                 if (rtp_packets == 1) {
-                    /* Send binary frame directly to avoid heap allocation and vector copying. */
                     if (streamer && streamer->isConnected()) {
                         streamer->writeBinary((uint8_t*)frame.data, frame.datalen);
                     }
                     continue;
                 }
 
-                /* For rtp_packet aggregation, write into sbuffer under mutex and, if sbuffer
-                   must be drained, read and send in fixed-size chunks from the session scratch. */
                 switch_mutex_lock(tech_pvt->mutex);
 
                 enforce_max_queue_ms(tech_pvt, sbuffer, tech_pvt->sampling, channels);
@@ -1314,22 +1297,20 @@ extern "C" {
 
                 if (switch_buffer_freespace(sbuffer) == 0) {
                     switch_size_t inuse = switch_buffer_inuse(sbuffer);
-                    switch_mutex_unlock(tech_pvt->mutex);
 
-                    /* Drain `inuse` bytes from sbuffer in fixed-size chunks and send them.
-                       Read without holding tech_pvt->mutex to avoid blocking producers for long. */
                     switch_size_t remaining = inuse;
                     while (remaining > 0) {
                         size_t to_read = remaining > tech_pvt->read_scratch_len ? tech_pvt->read_scratch_len : remaining;
                         switch_buffer_read(sbuffer, tech_pvt->read_scratch, (switch_size_t)to_read);
+                        remaining -= to_read;
+
+                        switch_mutex_unlock(tech_pvt->mutex);
                         if (streamer && streamer->isConnected()) {
                             streamer->writeBinary(tech_pvt->read_scratch, to_read);
                         }
-                        remaining -= to_read;
+                        switch_mutex_lock(tech_pvt->mutex);
                     }
 
-                    switch_mutex_lock(tech_pvt->mutex);
-                    /* zeroing not required here since we've consumed the bytes */
                     switch_mutex_unlock(tech_pvt->mutex);
                 } else {
                     switch_mutex_unlock(tech_pvt->mutex);
@@ -1360,7 +1341,6 @@ extern "C" {
                     if(freespace == 0) {
                         switch_size_t inuse = switch_buffer_inuse(sbuffer);
                         if (inuse > 0) {
-                            /* Drain inuse bytes in fixed-size chunks and send directly (no STL). */
                             switch_size_t remaining = inuse;
                             while (remaining > 0) {
                                 size_t to_read = remaining > tech_pvt->read_scratch_len ? tech_pvt->read_scratch_len : remaining;
@@ -1376,7 +1356,6 @@ extern "C" {
                     continue;
                 }
 
-                /* Use per-session read_scratch for resampler output to avoid heap allocations. */
                 spx_int16_t *out_ptr = (spx_int16_t*) tech_pvt->read_scratch;
 
                 if (channels == 1) {
@@ -1404,7 +1383,7 @@ extern "C" {
                         continue;
                     }
 
-                    if (bytes_written <= switch_buffer_freespace(tech_pvt->sbuffer)) {
+                    if (bytes_written <= switch_buffer_freespace(sbuffer)) {
                         switch_buffer_write(sbuffer, (const uint8_t *)out_ptr, bytes_written);
                     }
                 }
@@ -1436,8 +1415,14 @@ extern "C" {
         if(bug)
         {
             auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
+            if (!tech_pvt) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                  "stream_session_cleanup: bug found but tech_pvt is NULL\n");
+                return SWITCH_STATUS_FALSE;
+            }
             char sessionId[MAX_SESSION_ID];
-            strcpy(sessionId, tech_pvt->sessionId);
+            strncpy(sessionId, tech_pvt->sessionId, MAX_SESSION_ID);
+            sessionId[MAX_SESSION_ID - 1] = '\0';
 
             std::shared_ptr<AudioStreamer>* sp_wrap = nullptr;
             std::shared_ptr<AudioStreamer> streamer;
@@ -1465,8 +1450,6 @@ extern "C" {
             switch_mutex_unlock(tech_pvt->mutex);
 
             if (!channelIsClosing) {
-                /* Non-channel closing stop: remove bug to stop callbacks.
-                   CLOSE callback will see cleanup_started and return quickly. */
                 switch_core_media_bug_remove(session, &bug);
             }
 

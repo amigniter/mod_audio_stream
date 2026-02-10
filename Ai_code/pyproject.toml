@@ -9,6 +9,16 @@ dependencies = [
   "python-dotenv>=1.0.0",
 ]
 
+[project.optional-dependencies]
+hq = [
+  "soxr>=0.3.0",
+  "numpy>=1.24.0",
+]
+alt = [
+  "samplerate>=0.2.0",
+  "numpy>=1.24.0",
+]
+
 [tool.pytest.ini_options]
 minversion = "7.0"
 addopts = "-q"

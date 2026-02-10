@@ -34,6 +34,8 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
         switch_core_media_bug_get_session(bug);
     private_t *tech_pvt = (private_t *) user_data;
 
+    if (!tech_pvt) return SWITCH_TRUE;
+
     switch (type) {
 
     case SWITCH_ABC_TYPE_INIT:
@@ -60,7 +62,7 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
             switch_frame_t *frame =
                 switch_core_media_bug_get_write_replace_frame(bug);
 
-            if (!frame || !frame->data || frame->datalen == 0 || !tech_pvt || !tech_pvt->inject_buffer) {
+            if (!frame || !frame->data || frame->datalen == 0 || !tech_pvt) {
                 break;
             }
 
@@ -70,6 +72,11 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
             switch_size_t got = 0;
 
             switch_mutex_lock(tech_pvt->mutex);
+
+            if (!tech_pvt->inject_buffer) {
+                switch_mutex_unlock(tech_pvt->mutex);
+                break;
+            }
 
             if (!tech_pvt->inject_scratch || tech_pvt->inject_scratch_len < need) {
                 uint8_t *nbuf = (uint8_t *)switch_core_session_alloc(session, need);
@@ -86,12 +93,10 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
 
             avail = switch_buffer_inuse(tech_pvt->inject_buffer);
 
-            /* Optional jitter buffer: wait until we have at least inject_min_buffer_ms queued. */
-            if (tech_pvt->inject_min_buffer_ms > 0 && tech_pvt->inject_sample_rate > 0) {
+            if (tech_pvt->cfg.inject_min_buffer_ms > 0 && tech_pvt->inject_sample_rate > 0) {
                 const switch_size_t bytes_per_ms = (switch_size_t)tech_pvt->inject_sample_rate * 2u * (switch_size_t)tech_pvt->channels / 1000u;
-                const switch_size_t min_bytes = bytes_per_ms * (switch_size_t)tech_pvt->inject_min_buffer_ms;
+                const switch_size_t min_bytes = bytes_per_ms * (switch_size_t)tech_pvt->cfg.inject_min_buffer_ms;
                 if (avail < min_bytes) {
-                    /* Not enough audio yet: mix silence this frame to keep the call stable. */
                     to_read = 0;
                 } else {
                     to_read = (avail > need) ? need : avail;
@@ -107,24 +112,13 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
 
             if (got < need) {
                 tech_pvt->inject_underruns++;
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),
-                                  SWITCH_LOG_DEBUG,
-                                  "(%s) PUSHBACK underrun: need=%lu got=%lu avail_before=%lu\n",
-                                  switch_core_session_get_uuid(session),
-                                  (unsigned long)need,
-                                  (unsigned long)got,
-                                  (unsigned long)avail);
             }
 
-            {
-                int16_t *dst = (int16_t *)frame->data;
-                const int16_t *src = (const int16_t *)inj;
-                const switch_size_t samples = need / 2;
-                for (switch_size_t i = 0; i < samples; ++i) {
-                    int32_t v = (int32_t)dst[i] + (int32_t)src[i];
-                    if (v > 32767) v = 32767;
-                    else if (v < -32768) v = -32768;
-                    dst[i] = (int16_t)v;
+            if (got > 0) {
+                /* Always replace: copy inject audio then silence-pad the remainder */
+                memcpy(frame->data, inj, got);
+                if (got < need) {
+                    memset((uint8_t *)frame->data + got, 0, need - got);
                 }
             }
 
@@ -138,6 +132,12 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
             if ((now - tech_pvt->inject_last_report) > 1000000) {
                 const double loss_pct = tech_pvt->inject_write_calls ?
                     (100.0 * (double)tech_pvt->inject_underruns / (double)tech_pvt->inject_write_calls) : 0.0;
+
+                switch_mutex_lock(tech_pvt->mutex);
+                const unsigned long inject_inuse_now = tech_pvt->inject_buffer ?
+                    (unsigned long)switch_buffer_inuse(tech_pvt->inject_buffer) : 0;
+                switch_mutex_unlock(tech_pvt->mutex);
+
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),
                                   SWITCH_LOG_INFO,
                                   "(%s) PUSHBACK consume: write_calls=%llu bytes_read=%llu underruns=%llu loss%%=%.1f inject_inuse_now=%lu\n",
@@ -146,7 +146,7 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
                                   (unsigned long long)tech_pvt->inject_bytes,
                                   (unsigned long long)tech_pvt->inject_underruns,
                                   loss_pct,
-                                  (unsigned long)switch_buffer_inuse(tech_pvt->inject_buffer));
+                                  inject_inuse_now);
                 tech_pvt->inject_last_report = now;
                 tech_pvt->inject_write_calls = 0;
                 tech_pvt->inject_bytes = 0;
@@ -184,7 +184,6 @@ static switch_status_t start_capture(switch_core_session_t *session,
     void *pUserData = NULL;
 
     int channels = (flags & SMBF_STEREO) ? 2 : 1;
-    /* Allow per-call tuning via channel vars (defaults handled in glue.cpp). */
     (void)get_channel_var_int(session, "STREAM_FRAME_MS", 0);
 
     if (switch_channel_get_private(channel, MY_BUG_NAME)) {
@@ -197,6 +196,12 @@ static switch_status_t start_capture(switch_core_session_t *session,
     }
 
     read_codec = switch_core_session_get_read_codec(session);
+
+    if (!read_codec || !read_codec->implementation) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                          "start_capture: no read codec or implementation\n");
+        return SWITCH_STATUS_FALSE;
+    }
 
     if (stream_session_init(
             session,
@@ -313,7 +318,15 @@ SWITCH_STANDARD_API(stream_function)
             }
         }
 
-        if (argc > 4) sampling = atoi(argv[4]);
+        if (argc > 4) {
+            sampling = atoi(argv[4]);
+            if (sampling != 8000 && sampling != 16000 && sampling != 24000 &&
+                sampling != 32000 && sampling != 48000) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(lsession), SWITCH_LOG_WARNING,
+                                  "Invalid sampling rate %d, defaulting to 8000\n", sampling);
+                sampling = 8000;
+            }
+        }
 
         status = start_capture(
             lsession,
