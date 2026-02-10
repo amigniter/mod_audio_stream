@@ -90,8 +90,8 @@ enum notifyEvent_t {
     MESSAGE
 };
 
-#endif 
-
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* MOD_AUDIO_STREAM_H */

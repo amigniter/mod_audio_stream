@@ -103,13 +103,13 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
         True if fs_send_json_audio else False,
     )
 
-    # OpenAI input side: many realtime pipelines behave best at 16k mono PCM16.
-    openai_input_sample_rate = _env_int("OPENAI_INPUT_SAMPLE_RATE", 16000)
+    # OpenAI input side: OpenAI Realtime API always expects 24kHz PCM16 mono.
+    openai_input_sample_rate = _env_int("OPENAI_INPUT_SAMPLE_RATE", 24000)
     openai_resample_input = _env_bool("OPENAI_RESAMPLE_INPUT", False)
 
-    # OpenAI output side: some audio delta events omit sample_rate. Defaulting to 16k
-    # matches typical Realtime output and prevents "unclear/fast" audio when injecting to 8k FS.
-    openai_output_sample_rate = _env_int("OPENAI_OUTPUT_SAMPLE_RATE", 16000)
+    # OpenAI output side: Realtime API always outputs 24kHz PCM16 mono.
+    # The C++ mod (SpeexDSP) resamples from this rate to FS session rate on injection.
+    openai_output_sample_rate = _env_int("OPENAI_OUTPUT_SAMPLE_RATE", 24000)
 
     # Input mode:
     # - "buffer": input_audio_buffer.append + commit (legacy and can hit commit_empty)

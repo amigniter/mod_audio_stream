@@ -40,3 +40,21 @@ def test_stateful_resample_matches_whole() -> None:
 
     # Outputs won't be byte-identical due to chunk boundaries, but lengths should be close.
     assert abs(len(chunked) - len(whole)) <= 2000
+
+
+def test_resample_8k_to_24k_length_scales() -> None:
+    """Production path: FS 8kHz -> OpenAI 24kHz. Expect ~3x bytes."""
+    pcm8 = _tone_pcm16_mono(8000, 440.0, 200)
+    r = PCM16Resampler(src_rate=8000, dst_rate=24000, src_channels=1, dst_channels=1)
+    pcm24 = r.convert(pcm8)
+    # 3x ratio, allow for filter transients
+    assert len(pcm24) > len(pcm8) * 2.5
+    assert len(pcm24) < len(pcm8) * 3.5
+
+
+def test_resample_noop_same_rate() -> None:
+    """No resample when src == dst."""
+    pcm = _tone_pcm16_mono(24000, 440.0, 100)
+    r = PCM16Resampler(src_rate=24000, dst_rate=24000)
+    out = r.convert(pcm)
+    assert out == pcm

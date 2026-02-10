@@ -289,7 +289,10 @@ SWITCH_STANDARD_API(stream_function)
     switch_media_bug_flag_t flags = SMBF_READ_STREAM;
     int channels = 1;
 
-        if (!validate_ws_uri(argv[2], wsUri)) goto done;
+        if (argc < 3 || !argv[2] || !validate_ws_uri(argv[2], wsUri)) {
+            switch_core_session_rwunlock(lsession);
+            goto done;
+        }
 
         if (argc > 3 && argv[3]) {
             if (!strcasecmp(argv[3], "mono")) {
@@ -345,6 +348,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
     switch_event_reserve_subclass(EVENT_CONNECT);
     switch_event_reserve_subclass(EVENT_ERROR);
     switch_event_reserve_subclass(EVENT_DISCONNECT);
+    switch_event_reserve_subclass(EVENT_PLAY);
 
     SWITCH_ADD_API(
         api_interface,
@@ -363,5 +367,6 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_audio_stream_shutdown)
     switch_event_free_subclass(EVENT_CONNECT);
     switch_event_free_subclass(EVENT_DISCONNECT);
     switch_event_free_subclass(EVENT_ERROR);
+    switch_event_free_subclass(EVENT_PLAY);
     return SWITCH_STATUS_SUCCESS;
 }

@@ -29,7 +29,7 @@ static inline void mod_audio_stream_free_json(char* p) {
 
 #define MOD_AUDIO_STREAM_VERSION "1.1.0"
 #define FRAME_SIZE_8000  320 
-#define INJECT_BUFFER_MS_DEFAULT 60
+#define INJECT_BUFFER_MS_DEFAULT 5000
 #define MAX_AUDIO_BASE64_LEN (4 * 1024 * 1024) 
 #define STREAM_FRAME_MS_DEFAULT 20
 #define STREAM_INJECT_MIN_BUFFER_MS_DEFAULT 0
@@ -630,6 +630,7 @@ private:
         }
 
         const int out_sr = tech_pvt->sampling > 0 ? tech_pvt->sampling : tech_pvt->inject_sample_rate;
+        const int original_sample_rate = sampleRate;  /* preserve for logging before resample overwrites */
         if (out_sr <= 0) {
             push_err(out, m_sessionId, "processMessage - invalid output sample rate (session) for injection");
             return out;
@@ -742,7 +743,7 @@ private:
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
               "(%s) PUSHBACK queued: decoded_bytes=%zu in_sr=%d out_sr=%d in_ch=%d out_ch=%d inject_inuse_after=%u\n",
-              m_sessionId.c_str(), decoded.size(), sampleRate, out_sr, in_channels, out_channels, (unsigned)inuse_after);
+              m_sessionId.c_str(), decoded.size(), original_sample_rate, out_sr, in_channels, out_channels, (unsigned)inuse_after);
 
         cJSON_AddNumberToObject(jsonData, "bytes", (double)decoded.size());
 
@@ -780,9 +781,14 @@ namespace {
 
     static inline void drop_oldest_from_buffer(switch_buffer_t* buf, switch_size_t bytes) {
         if (!buf || bytes == 0) return;
-        std::vector<uint8_t> tmp;
-        tmp.resize((size_t)bytes);
-        switch_buffer_read(buf, tmp.data(), bytes);
+        /* Read-and-discard using a stack buffer to avoid heap allocation in hot path. */
+        uint8_t temp[SWITCH_RECOMMENDED_BUFFER_SIZE];
+        size_t remaining = (size_t)bytes;
+        while (remaining > 0) {
+            size_t toread = remaining > sizeof(temp) ? sizeof(temp) : remaining;
+            switch_buffer_read(buf, temp, (switch_size_t)toread);
+            remaining -= toread;
+        }
     }
 
     static inline void enforce_max_queue_ms(private_t* tech_pvt, switch_buffer_t* sbuffer,
@@ -897,6 +903,19 @@ namespace {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                 "%s: Error allocating read_scratch.\n", tech_pvt->sessionId);
             return SWITCH_STATUS_FALSE;
+        }
+
+        /* Pre-allocate inject_scratch so the WRITE_REPLACE hot path never needs to allocate.
+           Size it for a typical 20ms frame at 8kHz stereo (the maximum FS frame size). */
+        {
+            const size_t init_inject_scratch = FRAME_SIZE_8000 * channels;
+            tech_pvt->inject_scratch = (uint8_t*) switch_core_session_alloc(session, init_inject_scratch);
+            tech_pvt->inject_scratch_len = init_inject_scratch;
+            if (!tech_pvt->inject_scratch) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                    "%s: Error allocating inject_scratch.\n", tech_pvt->sessionId);
+                return SWITCH_STATUS_FALSE;
+            }
         }
 
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
@@ -1103,9 +1122,9 @@ extern "C" {
         const char* buffer_size;
         const char* extra_headers;
         int rtp_packets = 1; 
-        const char* tls_cafile = NULL;;
-        const char* tls_keyfile = NULL;;
-        const char* tls_certfile = NULL;;
+        const char* tls_cafile = NULL;
+        const char* tls_keyfile = NULL;
+        const char* tls_certfile = NULL;
         bool tls_disable_hostname_validation = false;
 
         switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -1126,7 +1145,7 @@ extern "C" {
         }
         if (const char* v = switch_channel_get_variable(channel, "STREAM_INJECT_BUFFER_MS")) {
             const int x = atoi(v);
-            if (x >= 0 && x <= 5000) inject_buffer_ms = x;
+            if (x >= 0 && x <= 30000) inject_buffer_ms = x;
         }
         if (const char* v = switch_channel_get_variable(channel, "STREAM_INJECT_MIN_BUFFER_MS")) {
             const int x = atoi(v);

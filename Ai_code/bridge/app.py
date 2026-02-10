@@ -64,21 +64,20 @@ async def pump_freeswitch_to_openai(
     openai_ws: websockets.WebSocketClientProtocol,
     cfg: BridgeConfig,
     tracker: InputAudioTracker,
+    send_lock: Optional[asyncio.Lock] = None,
 ) -> None:
     bytes_in = 0
     frames_in = 0
     started = False
 
-    # IMPORTANT: no resampling in Python. We forward audio as-is (optionally downmixed to mono).
+    # Resample FS audio (e.g. 8kHz) to OpenAI's expected rate (24kHz) if needed.
     openai_in_rate = int(getattr(cfg, "openai_input_sample_rate", cfg.fs_sample_rate))
 
     expected_frame_bytes = frame_bytes(cfg.fs_sample_rate, cfg.fs_channels, cfg.fs_frame_ms)
 
     inbuf = bytearray()
-    # When using item-based input mode, we also keep a local buffer of what we've sent since last turn.
-    # This buffer is flushed by the OpenAI->FS pump on server VAD turn-end.
-    # (Shared via tracker: appended_since_commit_bytes remains the byte counter; item_audio_buf keeps bytes.)
-    # NOTE: We stash the actual PCM bytes on the tracker object to avoid adding more shared state plumbing.
+    need_input_resample = (cfg.fs_sample_rate != openai_in_rate)
+    ratecv_state = None
     if not hasattr(tracker, "item_audio_buf"):
         setattr(tracker, "item_audio_buf", bytearray())
 
@@ -97,7 +96,6 @@ async def pump_freeswitch_to_openai(
                 bytes_in += len(frame)
                 frames_in += 1
 
-                # Normalize to mono and (optionally) resample before sending to OpenAI.
                 out_pcm = frame
                 if cfg.fs_channels != 1:
                     try:
@@ -105,21 +103,35 @@ async def pump_freeswitch_to_openai(
                     except Exception:
                         pass
 
+                if need_input_resample:
+                    try:
+                        out_pcm, ratecv_state = audioop.ratecv(
+                            out_pcm, 2, 1, 
+                            cfg.fs_sample_rate, openai_in_rate,
+                            ratecv_state,
+                        )
+                    except Exception:
+                        logger.exception("Input resample %d->%d failed", cfg.fs_sample_rate, openai_in_rate)
+
                 out_pcm = ensure_even_bytes(out_pcm)
 
                 try:
-                    await openai_ws.send(
-                        json.dumps(
-                            {
-                                "type": "input_audio_buffer.append",
-                                "audio": base64.b64encode(out_pcm).decode("ascii"),
-                            }
-                        )
+                    pkt = json.dumps(
+                        {
+                            "type": "input_audio_buffer.append",
+                            "audio": base64.b64encode(out_pcm).decode("ascii"),
+                        }
                     )
+                    if send_lock is not None:
+                        async with send_lock:
+                            await openai_ws.send(pkt)
+                    else:
+                        await openai_ws.send(pkt)
                 except Exception:
                     logger.exception("Failed sending input_audio_buffer.append to OpenAI")
                     raise
 
+                # Only mark appended after successful send
                 tracker.on_appended(len(out_pcm))
                 if getattr(cfg, "openai_input_mode", "buffer") == "item":
                     # Keep a copy so we can send a full utterance as a single conversation.item.create.
@@ -139,17 +151,13 @@ async def pump_freeswitch_to_openai(
                         frames_in,
                         tracker.appended_since_commit_bytes,
                         openai_in_rate,
-                        False,
+                        need_input_resample,
                     )
 
             if frames_in and frames_in % 50 == 0:
                 logger.debug("FreeSWITCH->OpenAI: frames=%d bytes=%d tail=%d", frames_in, bytes_in, len(inbuf))
 
-            # IMPORTANT:
-            # Do NOT commit from this pump.
-            # Commits must be synchronized with OpenAI's VAD turn-end events (received in the
-            # OpenAI->FS pump), otherwise OpenAI can reject commits as empty (0.00ms) even while
-            # audio is flowing.
+            
         else:
             parsed = _safe_json_loads(str(message))
             if parsed is not None:
@@ -163,6 +171,7 @@ async def pump_openai_to_freeswitch(
     upstream_ws: websockets.WebSocketServerProtocol,
     cfg: BridgeConfig,
     tracker: InputAudioTracker,
+    send_lock: Optional[asyncio.Lock] = None,
 ) -> None:
     contract = FsAudioContract(
         sample_rate=int(cfg.fs_out_sample_rate),
@@ -170,11 +179,6 @@ async def pump_openai_to_freeswitch(
         frame_ms=int(cfg.fs_frame_ms),
     )
 
-    # IMPORTANT:
-    # We buffer and slice *OpenAI output* audio in frames that match the sampleRate we declare
-    # in the JSON payload. The C++ module will resample those frames to the FS session rate.
-    # If we slice using FS-rate frame sizes while buffering 16k audio, we create 10ms chunks
-    # after resample and trigger injector underruns.
     openai_out_rate = int(getattr(cfg, "openai_output_sample_rate", contract.sample_rate))
     openai_out_channels = 1
 
@@ -182,11 +186,11 @@ async def pump_openai_to_freeswitch(
 
     buf = bytearray()
 
-    # Precomputed silence frame used when we need to maintain timing but have no audio.
     silence_frame = b"\x00" * out_frame_bytes
 
+    max_buf_ms = max(cfg.playout_max_buffer_ms, cfg.playout_prebuffer_ms, cfg.fs_frame_ms)
     max_buf_bytes = ceil_to_frame(
-        frame_bytes(openai_out_rate, openai_out_channels, max(cfg.playout_max_buffer_ms, cfg.fs_frame_ms)),
+        frame_bytes(openai_out_rate, openai_out_channels, max_buf_ms),
         out_frame_bytes,
     )
     prebuffer_bytes = ceil_to_frame(
@@ -194,14 +198,8 @@ async def pump_openai_to_freeswitch(
         out_frame_bytes,
     )
 
-    # Output path: no Python resampling (C++ SpeexDSP handles it on injection).
-
-    # OpenAI requires ~>=100ms buffered before commit.
-    # IMPORTANT: threshold must be computed in the same format/rate we appended.
-    openai_in_rate = int(getattr(cfg, "openai_input_sample_rate", cfg.fs_sample_rate))
-    openai_resample = bool(getattr(cfg, "openai_resample_input", False))
     min_commit_ms = 100
-    min_commit_bytes = frame_bytes(openai_in_rate if openai_resample else cfg.fs_sample_rate, 1, min_commit_ms)
+    min_commit_bytes = frame_bytes(cfg.fs_sample_rate, 1, min_commit_ms)
     last_turn_evt_t = 0.0
 
     response_in_flight = False
@@ -216,37 +214,41 @@ async def pump_openai_to_freeswitch(
     user_text_buf: list[str] = []
     ai_text_buf: list[str] = []
 
-    # If we get a turn-end but don't yet have enough audio appended, remember it
-    # and commit as soon as we cross the threshold. This avoids commit_empty.
     pending_turn_end: Optional[str] = None
 
-    # Item-mode safety: cap how much audio we buffer locally if VAD events are delayed/missed.
-    # Default: 20 seconds (in OpenAI input sample rate, mono PCM16).
     item_max_buffer_ms = int(getattr(cfg, "openai_item_max_buffer_ms", 20000))
-    item_max_bytes = frame_bytes(openai_in_rate if openai_resample else cfg.fs_sample_rate, 1, item_max_buffer_ms)
+    item_max_bytes = frame_bytes(cfg.fs_sample_rate, 1, item_max_buffer_ms)
 
-    # Adaptive playout targets: keep a steady buffer to smooth bursty OpenAI audio.
-    # This reduces audible choppiness by avoiding the "overflow->drop->underrun" oscillation.
     target_buf_ms = int(getattr(cfg, "playout_target_buffer_ms", max(0, cfg.playout_prebuffer_ms)))
-    # Allow draining slightly faster when buffer grows too large.
-    max_drain_frames = int(getattr(cfg, "playout_max_drain_frames", 2))
-    if max_drain_frames < 1:
-        max_drain_frames = 1
-    if max_drain_frames > 4:
-        # Keep bounded so we don't create time/pitch artifacts.
-        max_drain_frames = 4
+    max_drain_frames = int(getattr(cfg, "playout_max_drain_frames", 8))
+    if max_drain_frames < 8:
+        max_drain_frames = 8
+    if max_drain_frames > 20:
+        max_drain_frames = 20
 
     target_buf_bytes = ceil_to_frame(
         frame_bytes(openai_out_rate, openai_out_channels, target_buf_ms),
         out_frame_bytes,
     )
 
+    item_turn_in_flight = False
+    last_item_turn_end_t = 0.0
+    item_turn_min_interval_s = 0.25
+
     async def _send_item_audio_and_respond(reason: str) -> None:
         """Item-based audio input: send one utterance as a conversation item, then create a response."""
         nonlocal response_in_flight
+        nonlocal item_turn_in_flight, last_item_turn_end_t
         # Avoid overlapping responses.
         if response_in_flight:
             return
+
+        now = time.monotonic()
+        if item_turn_in_flight and (now - last_item_turn_end_t) < item_turn_min_interval_s:
+            logger.debug("Item mode: turn already in flight; ignoring extra turn-end (%s)", reason)
+            return
+        item_turn_in_flight = True
+        last_item_turn_end_t = now
 
         audio_buf = getattr(tracker, "item_audio_buf", None)
         if not isinstance(audio_buf, (bytearray, bytes)) or len(audio_buf) == 0:
@@ -280,19 +282,43 @@ async def pump_openai_to_freeswitch(
             },
         }
 
-        # Clear buffer before sending to avoid duplicate sends if network glitches.
-        audio_buf.clear()
+        # Send the item atomically from a local copy. Only clear/ack the buffer after
+        # the network send succeeds to avoid losing audio on transient errors.
+        local_audio = bytes(audio_buf)
+        if not local_audio:
+            logger.debug("Item mode: nothing to send after copy (%s)", reason)
+            return
+
+        pkt = json.dumps(item_evt)
+        try:
+            logger.info("Item mode: sending conversation.item.create (%s)", reason)
+            if send_lock is not None:
+                async with send_lock:
+                    await openai_ws.send(pkt)
+            else:
+                await openai_ws.send(pkt)
+        except Exception:
+            logger.exception("Failed sending conversation.item.create to OpenAI; keeping buffer")
+            item_turn_in_flight = False
+            return
+
+        # Commit locally only after successful send
+        if isinstance(audio_buf, bytearray):
+            # clear the shared buffer
+            del audio_buf[: len(local_audio)]
+        else:
+            # overwrite attribute if it was bytes
+            setattr(tracker, "item_audio_buf", bytearray())
         tracker.on_committed()
 
-        logger.info("Item mode: sending conversation.item.create (%s)", reason)
-        await openai_ws.send(json.dumps(item_evt))
-
         if not _can_create_response():
+            # No response allowed yet (rate limit). Allow a new turn-end to retrigger later.
+            item_turn_in_flight = False
             return
         response_in_flight = True
         logger.info("Creating response (%s)", reason)
-        await openai_ws.send(
-            json.dumps(
+        try:
+            pkt2 = json.dumps(
                 {
                     "type": "response.create",
                     "response": {
@@ -301,7 +327,15 @@ async def pump_openai_to_freeswitch(
                     },
                 }
             )
-        )
+            if send_lock is not None:
+                async with send_lock:
+                    await openai_ws.send(pkt2)
+            else:
+                await openai_ws.send(pkt2)
+        except Exception:
+            logger.exception("Failed sending response.create after item audio; allowing retry")
+            response_in_flight = False
+            item_turn_in_flight = False
 
     def _can_create_response() -> bool:
         nonlocal last_response_create_t
@@ -337,8 +371,8 @@ async def pump_openai_to_freeswitch(
             return
         response_in_flight = True
         logger.info("Creating response (%s)", reason)
-        await openai_ws.send(
-            json.dumps(
+        try:
+            pkt = json.dumps(
                 {
                     "type": "response.create",
                     "response": {
@@ -347,7 +381,14 @@ async def pump_openai_to_freeswitch(
                     },
                 }
             )
-        )
+            if send_lock is not None:
+                async with send_lock:
+                    await openai_ws.send(pkt)
+            else:
+                await openai_ws.send(pkt)
+        except Exception:
+            logger.exception("Failed to send response.create; allowing retry")
+            response_in_flight = False
 
     async def _maybe_commit(reason: str) -> None:
         nonlocal last_turn_evt_t, commit_pending, commit_reason, commit_sent_t
@@ -371,7 +412,6 @@ async def pump_openai_to_freeswitch(
         commit_pending = True
         commit_reason = reason
         commit_sent_t = now
-        tracker.on_commit_sent()
         logger.info(
             "Sending commit (%s): appended_since_commit_bytes=%d threshold=%d commits_sent=%d commits_acked=%d",
             reason,
@@ -380,7 +420,21 @@ async def pump_openai_to_freeswitch(
             tracker.commits_sent,
             tracker.commits_acked,
         )
-        await openai_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+        try:
+            pkt = json.dumps({"type": "input_audio_buffer.commit"})
+            if send_lock is not None:
+                async with send_lock:
+                    await openai_ws.send(pkt)
+            else:
+                await openai_ws.send(pkt)
+        except Exception:
+            logger.exception("Failed sending input_audio_buffer.commit to OpenAI; will retry")
+            commit_pending = False
+            commit_reason = None
+            return
+
+        # Only mark commit_sent after a successful send
+        tracker.on_commit_sent()
 
     async def _maybe_commit_if_turn_pending() -> None:
         nonlocal pending_turn_end
@@ -433,20 +487,30 @@ async def pump_openai_to_freeswitch(
 
                 next_t += step_s
 
-                # IMPORTANT: Never "drain faster than real time" in the general case.
-                # Draining sends audio early and will inevitably cause later starvation when the
-                # upstream becomes bursty or stalls for a moment.
-                # We keep cadence at 1 frame/tick and rely on drop-oldest (max_buf_bytes cap)
-                # to bound latency.
+                # --- Adaptive drain ---
+                # OpenAI delivers audio in large bursts (seconds of audio in ~100ms).
+                # If we only drain 1 frame/tick, the buffer grows unbounded and the cap
+                # in the receive path drops huge chunks (audible artifacts).
+                # Instead: when buffer is above target, drain faster proportionally.
+                # When buffer is at/below target, drain exactly 1 frame/tick (real-time).
+                buf_len = len(buf)
                 frames_to_send = 1
+                if buf_len > target_buf_bytes and target_buf_bytes > 0:
+                    # How many frames above target?
+                    excess_frames = (buf_len - target_buf_bytes) // out_frame_bytes
+                    # Scale drain: 1 base + proportional excess, capped by max_drain_frames
+                    frames_to_send = min(max_drain_frames, 1 + excess_frames)
+                elif buf_len > out_frame_bytes * 3 and target_buf_bytes == 0:
+                    # No target set but buffer is growing; drain a bit faster
+                    frames_to_send = min(max_drain_frames, buf_len // out_frame_bytes)
 
                 for _ in range(frames_to_send):
                     if len(buf) >= out_frame_bytes:
                         frame = bytes(buf[:out_frame_bytes])
                         del buf[:out_frame_bytes]
                     else:
-                        frame = silence_frame
                         underruns += 1
+                        continue
 
                     if cfg.fs_send_json_audio:
                         payload = fs_stream_audio_json(
@@ -531,6 +595,7 @@ async def pump_openai_to_freeswitch(
                     logger.info("AI_TEXT_FINAL: %s", "".join(ai_text_buf).strip())
                 ai_text_buf.clear()
                 user_text_buf.clear()
+                response_in_flight = False
 
             if evt_type in (
                 "response.audio.delta",
@@ -555,8 +620,8 @@ async def pump_openai_to_freeswitch(
 
                 pcm = ensure_even_bytes(pcm)
 
-                # Default OpenAI output is typically 16k mono PCM16.
-                # Some events omit sample_rate/channels; use config defaults in that case.
+                # OpenAI Realtime API outputs 24kHz mono PCM16.
+                # Use config defaults if event omits sample_rate/channels.
                 src_rate = int(getattr(cfg, "openai_output_sample_rate", cfg.fs_sample_rate))
                 src_ch = 1
                 if isinstance(evt.get("sample_rate"), int):
@@ -575,11 +640,18 @@ async def pump_openai_to_freeswitch(
 
                 buf.extend(pcm)
 
-                if max_buf_bytes > 0 and len(buf) > max_buf_bytes:
+                # NOTE: we no longer hard-cap (drop) in the receive path.
+                # The playout loop drains aggressively when above target_buf_bytes,
+                # which prevents the oscillating "burst→drop→underrun" cycle that
+                # caused audible artifacts. The C++ mod's own inject_buffer has its
+                # own overflow protection as a final safety net.
+                if max_buf_bytes > 0 and len(buf) > max_buf_bytes * 2:
+                    # Absolute safety: only if buffer somehow reaches 2x max (shouldn't
+                    # happen with drain, but protects against pathological stalls).
                     overflow = len(buf) - max_buf_bytes
                     dropped = drop_oldest_frame_aligned(buf, overflow, out_frame_bytes)
                     logger.warning(
-                        "Playout buffer capped: dropped_bytes=%d buf_ms_now=%.1f max_buf_ms=%d",
+                        "Playout emergency cap: dropped_bytes=%d buf_ms_now=%.1f max_buf_ms=%d",
                         dropped,
                         (len(buf) / out_frame_bytes) * contract.frame_ms if out_frame_bytes > 0 else 0.0,
                         cfg.playout_max_buffer_ms,
@@ -627,6 +699,7 @@ async def pump_openai_to_freeswitch(
 
             if evt_type in ("response.completed", "response.done"):
                 response_in_flight = False
+                item_turn_in_flight = False
 
             elif evt_type in ("error", "session.created", "session.updated"):
                 if evt_type == "error":
@@ -655,6 +728,10 @@ async def pump_openai_to_freeswitch(
 
     finally:
         playout_task.cancel()
+        try:
+            await playout_task
+        except asyncio.CancelledError:
+            pass
 
 
 async def handle_call(cfg: BridgeConfig, upstream_ws: websockets.WebSocketServerProtocol) -> None:
@@ -677,14 +754,31 @@ async def handle_call(cfg: BridgeConfig, upstream_ws: websockets.WebSocketServer
             logger.warning("FreeSWITCH: failed to send handshake: %s", e)
 
     tracker = InputAudioTracker()
-    to_openai = asyncio.create_task(pump_freeswitch_to_openai(upstream_ws, openai_ws, cfg, tracker))
-    to_fs = asyncio.create_task(pump_openai_to_freeswitch(openai_ws, upstream_ws, cfg, tracker))
+    # Single lock to serialize sends to the OpenAI websocket. This prevents
+    # concurrent send races and keeps local bookkeeping accurate.
+    send_lock = asyncio.Lock()
+    to_openai = asyncio.create_task(
+        pump_freeswitch_to_openai(upstream_ws, openai_ws, cfg, tracker, send_lock=send_lock)
+    )
+    to_fs = asyncio.create_task(
+        pump_openai_to_freeswitch(openai_ws, upstream_ws, cfg, tracker, send_lock=send_lock)
+    )
 
     done, pending = await asyncio.wait({to_openai, to_fs}, return_when=asyncio.FIRST_EXCEPTION)
     for t in pending:
         t.cancel()
 
-    await openai_ws.close()
+    # Close OpenAI websocket cleanly.
+    try:
+        await openai_ws.close()
+    except Exception:
+        logger.debug("openai_ws.close() failed or already closed")
+
+    # Also attempt to close the incoming upstream websocket (FreeSWITCH side).
+    try:
+        await upstream_ws.close()
+    except Exception:
+        logger.debug("upstream_ws.close() failed or already closed")
 
 
 async def run_server(cfg: BridgeConfig) -> None:
