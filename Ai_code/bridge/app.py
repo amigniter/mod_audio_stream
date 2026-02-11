@@ -42,10 +42,6 @@ from .tts import TTSEngine, SentenceBuffer, TTSCache
 
 logger = logging.getLogger(__name__)
 
-
-# ─────────────────────────────────────────────────────────────────
-#  JitterBuffer — unbounded, frame-aligned, never drops audio
-# ─────────────────────────────────────────────────────────────────
 class JitterBuffer:
     """Frame-aligned jitter buffer backed by an unbounded deque.
 
@@ -208,7 +204,7 @@ async def pump_freeswitch_to_openai(
 
                 out_pcm = frame
 
-                # Mono downmix if needed
+                
                 if cfg.fs_channels != 1:
                     try:
                         import warnings
@@ -218,18 +214,18 @@ async def pump_freeswitch_to_openai(
                         out_pcm = audioop.tomono(out_pcm, 2, 0.5, 0.5)
                     except ImportError:
                         try:
-                            import audioop_lts as audioop  # type: ignore
+                            import audioop_lts as audioop 
                             out_pcm = audioop.tomono(out_pcm, 2, 0.5, 0.5)
                         except ImportError:
                             logger.warning("audioop unavailable — cannot downmix stereo input")
 
-                # High-quality resample 8k->24k
+
                 if input_resampler is not None:
                     out_pcm = input_resampler.process(out_pcm)
 
                 out_pcm = ensure_even_bytes(out_pcm)
 
-                # Never send empty audio to OpenAI
+               
                 if len(out_pcm) == 0:
                     continue
 
@@ -315,10 +311,13 @@ async def pump_openai_to_freeswitch(
     last_item_turn_end_t = 0.0
     item_turn_min_interval_s = 0.25
 
-    # ── Custom TTS pipeline state ──
     sentence_buffer: Optional[SentenceBuffer] = None
     tts_tasks: list[asyncio.Task] = []
     tts_voice_id = cfg.tts_voice_id or ""
+
+    _tts_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    _tts_worker_task: Optional[asyncio.Task] = None
+
     if use_custom_tts:
         sentence_buffer = SentenceBuffer(
             max_chars=cfg.tts_sentence_max_chars,
@@ -364,7 +363,6 @@ async def pump_openai_to_freeswitch(
             text[:50], chunk_count, total_bytes, elapsed_ms,
         )
 
-        # Store in cache
         if tts_cache is not None and total_bytes > 0:
             full_pcm = b"".join(pcm_parts)
             await tts_cache.put(
@@ -374,12 +372,34 @@ async def pump_openai_to_freeswitch(
                 synthesis_ms=elapsed_ms,
             )
 
+    async def _tts_worker() -> None:
+        """Serial worker: pulls sentences off the queue one at a time.
+
+        This ensures sentence N is fully synthesized and enqueued into
+        the JitterBuffer before sentence N+1 begins, preventing audio
+        interleaving and gaps between sentences.
+        """
+        try:
+            while True:
+                text = await _tts_queue.get()
+                if text is None:
+                    break  # Poison pill — shut down
+                try:
+                    await _synthesize_and_enqueue(text)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("TTS worker error for '%.60s'", text)
+        except asyncio.CancelledError:
+            return
+
     def _schedule_tts(text: str) -> None:
-        """Schedule TTS synthesis as a background task."""
-        task = asyncio.create_task(_synthesize_and_enqueue(text))
-        tts_tasks.append(task)
-        # Clean up completed tasks
-        tts_tasks[:] = [t for t in tts_tasks if not t.done()]
+        """Enqueue a sentence for serial TTS synthesis."""
+        nonlocal _tts_worker_task
+        # Ensure worker is running
+        if _tts_worker_task is None or _tts_worker_task.done():
+            _tts_worker_task = asyncio.create_task(_tts_worker())
+        _tts_queue.put_nowait(text)
 
     async def _flush_sentence_buffer() -> None:
         """Flush remaining text in sentence buffer to TTS."""
@@ -390,6 +410,24 @@ async def pump_openai_to_freeswitch(
 
     async def _cancel_tts_tasks() -> None:
         """Cancel all in-flight TTS synthesis (barge-in)."""
+        nonlocal _tts_worker_task
+
+        # Drain the queue so no new sentences start
+        while not _tts_queue.empty():
+            try:
+                _tts_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        # Cancel the worker (interrupts in-flight HTTP request)
+        if _tts_worker_task is not None and not _tts_worker_task.done():
+            _tts_worker_task.cancel()
+            try:
+                await _tts_worker_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        _tts_worker_task = None
+
         for t in tts_tasks:
             if not t.done():
                 t.cancel()
@@ -399,8 +437,9 @@ async def pump_openai_to_freeswitch(
             except (asyncio.CancelledError, Exception):
                 pass
         tts_tasks.clear()
+
         if sentence_buffer is not None:
-            sentence_buffer.flush()  # discard pending text
+            sentence_buffer.flush() 
 
     async def _send_item_audio_and_respond(reason: str) -> None:
         nonlocal response_in_flight, item_turn_in_flight, last_item_turn_end_t
@@ -485,6 +524,17 @@ async def pump_openai_to_freeswitch(
         last_response_create_t = time.monotonic()
 
     async def _playout_loop() -> None:
+        """Frame-accurate playout loop with adaptive re-prebuffering.
+
+        Key design for custom TTS (eliminates crackling):
+          - When the JitterBuffer runs dry, DON'T blast silence frames.
+          - Instead, PAUSE playout and wait for new audio to arrive.
+          - Re-prebuffer (accumulate MIN_REBUFFER_MS) before resuming.
+          - This prevents the click/pop caused by audio→silence→audio
+            transitions between TTS sentences.
+          - For standard OpenAI audio (arrives 3-5x real-time), the
+            buffer rarely empties so this has minimal impact.
+        """
         step_s = contract.frame_ms / 1000.0  # 0.020
 
         frames_sent = 0
@@ -495,43 +545,84 @@ async def pump_openai_to_freeswitch(
 
         silence_frame = b"\x00" * out_frame_bytes
 
-        PREBUFFER_TIMEOUT_S = 5.0
-
-        prebuffer_start = time.monotonic()
-        if prebuffer_bytes > 0:
-            while jbuf.buffered_bytes < prebuffer_bytes:
-                if time.monotonic() - prebuffer_start > PREBUFFER_TIMEOUT_S:
-                    logger.warning(
-                        "Prebuffer timeout (%.1fs) — starting playout with %d/%d bytes",
-                        PREBUFFER_TIMEOUT_S, jbuf.buffered_bytes, prebuffer_bytes,
-                    )
-                    break
-                await asyncio.sleep(0.005)
+        if use_custom_tts:
+            INITIAL_PREBUFFER_MS = max(cfg.playout_prebuffer_ms, 200)
+            REBUFFER_MS = 100  
         else:
-            while jbuf.buffered_frames == 0:
-                if time.monotonic() - prebuffer_start > PREBUFFER_TIMEOUT_S:
-                    logger.warning("Prebuffer timeout — no audio received, starting anyway")
+            INITIAL_PREBUFFER_MS = max(cfg.playout_prebuffer_ms, 60)
+            REBUFFER_MS = 40
+
+        initial_prebuffer_bytes = ceil_to_frame(
+            frame_bytes(openai_out_rate, openai_out_channels, INITIAL_PREBUFFER_MS),
+            out_frame_bytes,
+        )
+        rebuffer_bytes = ceil_to_frame(
+            frame_bytes(openai_out_rate, openai_out_channels, REBUFFER_MS),
+            out_frame_bytes,
+        )
+
+        logger.info(
+            "Playout: initial_prebuffer=%dms (%d bytes) rebuffer=%dms (%d bytes) custom_tts=%s",
+            INITIAL_PREBUFFER_MS, initial_prebuffer_bytes,
+            REBUFFER_MS, rebuffer_bytes, use_custom_tts,
+        )
+
+        async def _wait_for_audio(target_bytes: int, timeout_s: float, label: str) -> None:
+            """Block until JitterBuffer has at least target_bytes, or timeout."""
+            t0 = time.monotonic()
+            while jbuf.buffered_bytes < target_bytes:
+                if time.monotonic() - t0 > timeout_s:
+                    if jbuf.buffered_bytes > 0:
+                        logger.debug(
+                            "%s timeout (%.1fs) — starting with %d/%d bytes",
+                            label, timeout_s, jbuf.buffered_bytes, target_bytes,
+                        )
                     break
-                await asyncio.sleep(0.005)
+                await asyncio.sleep(0.004)
+
+        await _wait_for_audio(initial_prebuffer_bytes, 30.0, "Initial prebuffer")
 
         next_t = time.monotonic() + step_s
+        _playing = False  
 
         try:
             while True:
                 now = time.monotonic()
-                sleep_s = next_t - now
+
+                if jbuf.buffered_frames == 0:
+                    if _playing:
+                        _playing = False
+                        logger.debug("Playout: buffer empty, pausing for re-prebuffer")
+
+                    await _wait_for_audio(rebuffer_bytes, 0.5, "Re-prebuffer")
+
+                    if jbuf.buffered_frames == 0:
+                        underruns += 1
+                        await asyncio.sleep(step_s)
+                        next_t = time.monotonic() + step_s
+                        continue
+
+                    # Audio arrived — reset clock and resume
+                    next_t = time.monotonic() + step_s
+                    _playing = True
+                    logger.debug(
+                        "Playout: resuming with %d ms buffered",
+                        int(jbuf.buffered_ms),
+                    )
+
+                # ── Normal playout: send exactly 1 frame per tick ──
+                sleep_s = next_t - time.monotonic()
                 if sleep_s > 0.0005:
                     await asyncio.sleep(sleep_s)
 
                 now = time.monotonic()
-
                 if now - next_t > step_s * 2:
                     next_t = now
-
                 next_t += step_s
 
                 frame = jbuf.dequeue()
                 if frame is not None:
+                    _playing = True
                     if cfg.fs_send_json_audio:
                         payload = fs_stream_audio_json(
                             frame, contract,
@@ -544,15 +635,6 @@ async def pump_openai_to_freeswitch(
                     frames_sent += 1
                 else:
                     underruns += 1
-                    if cfg.fs_send_json_audio:
-                        payload = fs_stream_audio_json(
-                            silence_frame, contract,
-                            sample_rate_override=openai_out_rate,
-                            channels_override=openai_out_channels,
-                        )
-                    else:
-                        payload = silence_frame
-                    await upstream_ws.send(payload)
 
                 now_s = time.monotonic()
                 if now_s - last_stats_t >= 5.0:
@@ -635,7 +717,6 @@ async def pump_openai_to_freeswitch(
                 response_in_flight = False
                 item_turn_in_flight = False
 
-                # Flush any remaining text in sentence buffer to TTS
                 if use_custom_tts:
                     await _flush_sentence_buffer()
 

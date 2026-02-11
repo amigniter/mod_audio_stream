@@ -42,11 +42,9 @@ def _make_ssl_context() -> ssl.SSLContext:
         import certifi
         ctx.load_verify_locations(cafile=certifi.where())
     except ImportError:
-        pass  # Fall back to system certs
+        pass 
     return ctx
 
-# ElevenLabs streaming output settings
-# PCM signed 16-bit LE at 24kHz mono — matches our pipeline
 _OUTPUT_FORMAT = "pcm_24000"
 _SAMPLE_RATE = 24000
 _CHANNELS = 1
@@ -92,7 +90,6 @@ class ElevenLabsTTS(TTSEngine):
         self._output_format = output_format
         self._session: Optional[aiohttp.ClientSession] = None
 
-        # Parse sample rate from output format
         self._sample_rate = _SAMPLE_RATE
         if "16000" in output_format:
             self._sample_rate = 16000

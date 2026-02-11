@@ -87,8 +87,6 @@ class FailoverTTSEngine(TTSEngine):
                 t0 = time.monotonic()
                 async for chunk in engine.synthesize_stream(text, voice_id=voice_id):
                     chunk_count += 1
-                    # Adjust sample rate/channels to match primary
-                    # (all engines should output the same format, but just in case)
                     yield chunk
 
                 if chunk_count > 0:
@@ -100,7 +98,7 @@ class FailoverTTSEngine(TTSEngine):
                             engine.name, self._engines[0].name,
                             chunk_count, elapsed_ms, text,
                         )
-                    return  # Success
+                    return  
 
                 logger.warning("TTS %s returned 0 chunks for '%.40s'", engine.name, text)
 
@@ -111,7 +109,7 @@ class FailoverTTSEngine(TTSEngine):
                     engine.name, text, e,
                 )
 
-        # All engines failed
+       
         logger.error(
             "All TTS engines failed for '%.60s'. Last error: %s",
             text, last_error,
@@ -161,7 +159,7 @@ def create_tts_engine(cfg) -> TTSEngine:
         if secondary:
             engines.append(secondary)
 
-    # Always add OpenAI TTS-1 as last-resort fallback
+    
     openai_key = getattr(cfg, "openai_api_key", "")
     if openai_key and provider != "openai" and fallback != "openai":
         from .openai_tts import OpenAITTS
@@ -172,7 +170,7 @@ def create_tts_engine(cfg) -> TTSEngine:
 
     if not engines:
         logger.error("No TTS engines configured — custom voice will not work")
-        # Return a dummy that yields nothing
+      
         from .openai_tts import OpenAITTS
         if openai_key:
             return OpenAITTS(api_key=openai_key)
