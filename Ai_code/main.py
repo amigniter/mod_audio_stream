@@ -61,7 +61,6 @@ async def _async_main() -> None:
     logging.getLogger("bridge").info("=== mod-audio-stream bridge starting (config dump below, secrets masked) ===")
     _log_config(cfg)
 
-    # ── Initialize custom TTS engine (if configured) ──
     tts_engine = None
     tts_cache = None
 
@@ -71,21 +70,18 @@ async def _async_main() -> None:
         logger.info("Initializing custom TTS: provider=%s", cfg.tts_provider)
         tts_engine = create_tts_engine(cfg)
 
-        # Warm up the engine (create HTTP sessions, etc.)
         try:
             await tts_engine.warm_up()
             logger.info("TTS engine ready: %s", tts_engine.name)
         except Exception:
             logger.warning("TTS warm-up failed (will retry on first call)", exc_info=True)
 
-        # Create phrase cache if enabled
         if cfg.tts_cache_enabled:
             tts_cache = TTSCache(
                 max_entries=cfg.tts_cache_max_entries,
                 ttl_seconds=cfg.tts_cache_ttl_s,
             )
 
-            # Pre-load common IVR phrases for 0ms latency
             common_phrases = [
                 "Thank you for calling.",
                 "How can I help you today?",
@@ -117,7 +113,10 @@ async def _async_main() -> None:
 
 
 def main() -> None:
-    asyncio.run(_async_main())
+    try:
+        asyncio.run(_async_main())
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

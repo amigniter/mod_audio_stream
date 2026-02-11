@@ -74,8 +74,6 @@ async def connect_openai_realtime(
         "OpenAI-Beta": "realtime=v1",
     }
 
-    # websockets >=12 uses `additional_headers`; older versions use
-    # `extra_headers`.  Try the modern kwarg first, fall back once.
     ws: Optional[websockets.WebSocketClientProtocol] = None
     for kwarg_name in ("additional_headers", "extra_headers"):
         try:
