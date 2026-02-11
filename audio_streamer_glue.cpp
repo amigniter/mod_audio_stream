@@ -29,24 +29,11 @@ static inline void mod_audio_stream_free_json(char* p) {
 #define INJECT_BUFFER_MS_DEFAULT 5000
 #define MAX_AUDIO_BASE64_LEN (4 * 1024 * 1024) 
 #define STREAM_FRAME_MS_DEFAULT 20
-#define STREAM_INJECT_MIN_BUFFER_MS_DEFAULT 0
+#define STREAM_INJECT_MIN_BUFFER_MS_DEFAULT 60
 #define STREAM_INJECT_LOG_EVERY_MS_DEFAULT 1000
 #define STREAM_RECONNECT_MAX_DEFAULT 0
 #define STREAM_MAX_QUEUE_MS_DEFAULT 0
 #define FILE_INJECT_MAX_SIZE (16 * 1024 * 1024)
-
-/**
- * Speex resampler quality for audio injection path (AI voice → caller).
- *
- * SWITCH_RESAMPLE_QUALITY (FreeSWITCH default, typically 3) is too low
- * for the 24kHz→8kHz downsampling path — it causes audible aliasing
- * artifacts that make the AI voice sound metallic/robotic.
- *
- * Quality 7 = sinc interpolation, broadcast-grade, still fast enough
- * for real-time on any modern CPU.  Quality 10 is overkill for telephony.
- *
- * This single change is the biggest improvement for natural-sounding voice.
- */
 #define INJECT_RESAMPLE_QUALITY 7
 
 static inline size_t pcm16_bytes_per_ms(int sampleRate, int channels) {
@@ -87,7 +74,6 @@ static inline bool is_safe_file_path(const char* path) {
     if (strncmp(path, "/proc/", 6) == 0) return false;
     if (strncmp(path, "/sys/", 5) == 0) return false;
     if (strncmp(path, "/dev/", 5) == 0) return false;
-    /* Reject symlinks to prevent traversal via /tmp/evil -> /etc/shadow */
     struct stat st;
     if (lstat(path, &st) == 0 && S_ISLNK(st.st_mode)) return false;
     return true;
@@ -516,7 +502,6 @@ private:
                                       m_sessionId.c_str(), (unsigned)flushed);
                 }
             }
-            /* Return success with empty rewrite — no audio to inject */
             out.ok = SWITCH_TRUE;
             out.rewrittenJsonData = "{}";
             return out;
@@ -708,7 +693,6 @@ private:
         }
 
         if (sampleRate != out_sr) {
-            /* Resample under a short lock — only touch inject_resampler, then unlock for the actual resample work */
             SpeexResamplerState* local_resampler = nullptr;
 
             switch_mutex_lock(tech_pvt->mutex);
@@ -746,7 +730,6 @@ private:
             local_resampler = tech_pvt->inject_resampler;
             switch_mutex_unlock(tech_pvt->mutex);
 
-            /* Do the actual resample work outside the mutex to minimize contention */
             decoded = resample_pcm16le_speex((const uint8_t*)decoded.data(), decoded.size(), out_channels,
                                             sampleRate, out_sr, local_resampler);
         
@@ -943,7 +926,10 @@ namespace {
         }
 
         {
-            const size_t init_inject_scratch = FRAME_SIZE_8000 * channels;
+            /* Allocate inject_scratch large enough for any frame size the
+             * codec might request.  SWITCH_RECOMMENDED_BUFFER_SIZE is safe;
+             * FRAME_SIZE_8000 is too small for wideband/ultra-wideband. */
+            const size_t init_inject_scratch = SWITCH_RECOMMENDED_BUFFER_SIZE;
             tech_pvt->inject_scratch = (uint8_t*) switch_core_session_alloc(session, init_inject_scratch);
             tech_pvt->inject_scratch_len = init_inject_scratch;
             if (!tech_pvt->inject_scratch) {

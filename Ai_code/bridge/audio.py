@@ -399,7 +399,7 @@ def peak_dbfs(pcm: bytes) -> float:
     if n == 0:
         return float("-inf")
     if _np is not None:
-        arr = _np.frombuffer(pcm, dtype=_np.int16)
+        arr = _np.frombuffer(pcm, dtype=_np.int16).astype(_np.int32)
         peak = float(_np.max(_np.abs(arr)))
     else:
         samples = struct.unpack(f"<{n}h", pcm)

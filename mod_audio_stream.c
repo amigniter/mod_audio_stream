@@ -122,10 +122,48 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
             switch_mutex_unlock(tech_pvt->mutex);
 
             if (got > 0) {
-                /* Always replace: copy inject audio then silence-pad the remainder */
-                memcpy(frame->data, inj, got);
-                if (got < need) {
-                    memset((uint8_t *)frame->data + got, 0, need - got);
+                /*
+                 * CRITICAL for voice quality: only inject audio when we have
+                 * a FULL frame.  Partial reads + silence padding create
+                 * audible clicks at the audio/silence boundary within the
+                 * frame.  When we don't have enough data, leave the original
+                 * frame untouched (caller hears silence from the RTP stream,
+                 * which is continuous and click-free).
+                 *
+                 * If we got a partial read, push the bytes BACK into the
+                 * buffer so they aren't lost — they'll be consumed next time
+                 * when combined with newly-arriving data.
+                 */
+                if (got >= need) {
+                    memcpy(frame->data, inj, need);
+                } else {
+                    /* Put partial data back — don't waste it */
+                    switch_mutex_lock(tech_pvt->mutex);
+                    if (tech_pvt->inject_buffer) {
+                        /*
+                         * We need to prepend to the buffer.  FreeSWITCH's
+                         * switch_buffer doesn't support prepend, so we read
+                         * the remaining data, write partial+remaining back.
+                         * For the common case (small partial near underrun),
+                         * remaining is small or zero, so this is cheap.
+                         */
+                        switch_size_t remaining = switch_buffer_inuse(tech_pvt->inject_buffer);
+                        if (remaining == 0) {
+                            /* Simple case: buffer is empty, just write back */
+                            switch_buffer_write(tech_pvt->inject_buffer, inj, got);
+                        } else if (remaining + got <= tech_pvt->read_scratch_len) {
+                            /* Read remaining into scratch, zero buffer, write partial+remaining */
+                            uint8_t *tmp = tech_pvt->read_scratch;
+                            switch_buffer_read(tech_pvt->inject_buffer, tmp, remaining);
+                            switch_buffer_zero(tech_pvt->inject_buffer);
+                            switch_buffer_write(tech_pvt->inject_buffer, inj, got);
+                            switch_buffer_write(tech_pvt->inject_buffer, tmp, remaining);
+                        } else {
+                            /* Remaining too large for scratch — just lose the partial (rare) */
+                            /* This shouldn't happen in practice since read_scratch is large */
+                        }
+                    }
+                    switch_mutex_unlock(tech_pvt->mutex);
                 }
             }
 

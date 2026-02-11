@@ -46,7 +46,6 @@ from .audio import (
     crossfade_pcm16,
     DCBlocker,
     ComfortNoiseGenerator,
-    ClickDetector,
     peak_dbfs,
 )
 from .config import BridgeConfig
@@ -423,9 +422,6 @@ class CallSession:
         )
 
         self._dc_blocker = DCBlocker(alpha=0.9975)       
-        self._click_detector = ClickDetector(
-            threshold_db=24.0, smoothing=0.85, warmup_frames=30,
-        )
         self._comfort_noise = ComfortNoiseGenerator(level_dbfs=-70.0)
         self._last_playout_frame: bytes = b""             
 
@@ -682,26 +678,24 @@ class CallSession:
                 pass
 
     async def _playout_loop(self) -> None:
-        """Ultra-advanced, frame-accurate playout loop with adaptive DSP.
+        """Ultra-low-latency, frame-accurate playout loop with adaptive DSP.
 
         Voice-quality features:
           1. **Adaptive prebuffering** — uses JitterBuffer jitter EMA to
              dynamically compute rebuffer depth instead of a static value.
-          2. **Comfort noise injection** — on underrun the caller hears
-             ambient-level Gaussian noise (−70 dBFS) instead of dead silence,
-             keeping the RTP stream alive and avoiding codec silence-detect.
-          3. **Click / pop detection** — running RMS check rejects frames
-             with transient spikes >12 dB above the rolling average.
-          4. **Equal-power crossfade** — when resuming after a gap, the
+          2. **DC blocking** — single-pole HPF on every TTS chunk removes
+             DC offset that causes clicks at segment boundaries.
+          3. **Equal-power crossfade** — when resuming after a gap, the
              first frame is crossfaded with the *last played* frame using
              a √sin curve, eliminating discontinuity clicks.
-          5. **Fade-in ramp** — first 3 frames after any resume get a
-             smooth amplitude ramp from 0→1 (numpy-accelerated).
-          6. **Jitter compensation** — if the event loop was delayed >2
+          4. **Minimal fade-in** — only 1 frame (20ms) fade on very first
+             audio to avoid hard onset.  Crossfade handles all other
+             resume transitions.
+          5. **Jitter compensation** — if the event loop was delayed >2
              ticks, snap the clock forward instead of burst-playing.
-          7. **Per-call metrics** — tracks chunks sent, underruns, peak
+          6. **Per-call metrics** — tracks chunks sent, underruns, peak
              buffer depth, and jitter for post-call analysis.
-          8. **Event-based wait** — zero CPU consumed while idle.
+          7. **Event-based wait** — zero CPU consumed while idle.
         """
         cfg = self._cfg
         contract = self._contract
@@ -718,8 +712,8 @@ class CallSession:
         last_stats_sent = 0
         last_stats_underruns = 0
 
-        FADE_IN_FRAMES = 3
-        CROSSFADE_SAMPLES = 160          
+        FADE_IN_FRAMES = 1               # Only 1 frame (20ms) fade-in for first-ever audio
+        CROSSFADE_SAMPLES = 160          # ~6.7ms at 24kHz — smooth segment stitching
 
         if self._use_custom_tts:
             INITIAL_PREBUFFER_MS = max(cfg.playout_prebuffer_ms, 200)
@@ -795,15 +789,23 @@ class CallSession:
                 if frame is not None:
                     _playing = True
 
-                    if self._click_detector.check(frame):
-                        frame = fade_in_pcm16(frame, 0, 2)  
-                        logger.debug("ClickDetector: attenuated glitched frame")
+                    # NOTE: ClickDetector removed from playout path.
+                    # TTS audio is synthesised PCM — it has no physical
+                    # click/pop artifacts.  The DCBlocker already removes
+                    # DC-offset jumps at segment boundaries, and
+                    # crossfade_pcm16 handles segment stitching.
 
                     if _fade_pos == 0 and self._last_playout_frame:
+                        # Crossfade from the last frame before the gap to
+                        # the first frame after resume — eliminates the
+                        # click at the underrun boundary.
                         frame = crossfade_pcm16(
                             self._last_playout_frame, frame,
                             overlap_samples=min(CROSSFADE_SAMPLES, len(frame) // 2),
                         )
+                        # After crossfade, skip fade-in — crossfade already
+                        # provides a smooth transition.
+                        _fade_pos = FADE_IN_FRAMES
 
                     if _fade_pos < FADE_IN_FRAMES:
                         frame = fade_in_pcm16(frame, _fade_pos, FADE_IN_FRAMES)
@@ -846,6 +848,9 @@ class CallSession:
                     last_stats_sent = frames_sent
                     last_stats_underruns = underruns
         except asyncio.CancelledError:
+            return
+        except websockets.ConnectionClosed:
+            logger.debug("Playout: connection closed, stopping")
             return
 
     def _handle_transcription(self, evt: dict, evt_type: str) -> None:
@@ -1265,3 +1270,5 @@ async def run_server(
             logger.warning("TTS engine close failed", exc_info=True)
 
     logger.info("✅ Server stopped cleanly. Goodbye!")
+    logger.info("👨‍💻 Developed by Rahul Singh | 📧 Contact: rahul.singh.cse79@gmail.com")
+
