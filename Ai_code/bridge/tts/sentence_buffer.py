@@ -132,11 +132,9 @@ class SentenceBuffer:
         if last_word in _ABBREVIATIONS:
             return None
 
-        # Don't flush tiny fragments
         if len(candidate) < self._min_chars:
             return None
 
-        # Extract the sentence
         self._buffer = self._buffer[match.end():]
         self._total_flushed += len(candidate)
         return candidate
@@ -145,7 +143,6 @@ class SentenceBuffer:
         """Force flush at the best natural break point."""
         buf = self._buffer
 
-        # Try to break at: comma, semicolon, colon, dash, or last space
         best_pos = -1
         for delim in (",", ";", ":", " — ", " - ", " "):
             pos = buf.rfind(delim, self._min_chars)
@@ -153,7 +150,6 @@ class SentenceBuffer:
                 best_pos = pos + len(delim)
 
         if best_pos <= self._min_chars:
-            # No good break point — flush everything
             text = buf.strip()
             self._buffer = ""
         else:

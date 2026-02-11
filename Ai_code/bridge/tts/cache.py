@@ -38,9 +38,9 @@ class CachedAudio:
     channels: int
     text: str
     voice_id: str
-    cached_at: float
-    synthesis_ms: float  # How long it took to generate (for metrics)
-
+    cached_at: float       # monotonic clock (for in-process TTL)
+    cached_at_wall: float  # wall clock (for serialization / Redis)
+    synthesis_ms: float    # How long it took to generate (for metrics)
 
 @dataclass
 class CacheStats:
@@ -71,8 +71,8 @@ class TTSCache:
         self,
         *,
         max_entries: int = 500,
-        max_bytes: int = 50 * 1024 * 1024,  # 50MB
-        ttl_seconds: float = 3600.0,  # 1 hour
+        max_bytes: int = 50 * 1024 * 1024,  
+        ttl_seconds: float = 3600.0,  
         normalize_text: bool = True,
     ) -> None:
         self._cache: OrderedDict[str, CachedAudio] = OrderedDict()
@@ -89,8 +89,7 @@ class TTSCache:
         normalized = text
         if self._normalize:
             normalized = text.lower().strip()
-            # Remove trailing punctuation variants so
-            # "Thank you." and "Thank you!" and "Thank you" all match
+            
             while normalized and normalized[-1] in ".!?,;:":
                 normalized = normalized[:-1]
             normalized = normalized.strip()
@@ -107,13 +106,11 @@ class TTSCache:
                 self.stats.misses += 1
                 return None
 
-            # Check TTL
             if self._ttl > 0 and (time.monotonic() - entry.cached_at) > self._ttl:
                 self._remove_entry(key)
                 self.stats.misses += 1
                 return None
 
-            # Move to end (most recently used)
             self._cache.move_to_end(key)
             self.stats.hits += 1
             self.stats.total_hit_bytes += len(entry.pcm16)
@@ -137,16 +134,16 @@ class TTSCache:
             text=text,
             voice_id=voice_id,
             cached_at=time.monotonic(),
+            cached_at_wall=time.time(),
             synthesis_ms=synthesis_ms,
         )
         audio_bytes = len(pcm16)
 
         async with self._lock:
-            # Remove existing entry if present
+            
             if key in self._cache:
                 self._remove_entry(key)
 
-            # Evict LRU entries if over limits
             while (
                 len(self._cache) >= self._max_entries
                 or self._total_bytes + audio_bytes > self._max_bytes
@@ -187,7 +184,7 @@ class TTSCache:
         self,
         phrases: list[str],
         voice_id: str,
-        tts_engine,  # TTSEngine
+        tts_engine, 
     ) -> int:
         """Pre-populate cache with common IVR phrases.
 
@@ -221,7 +218,7 @@ class TTSCache:
         return cached
 
 
-# Common IVR phrases to preload
+
 DEFAULT_IVR_PHRASES = [
     "Thank you for calling.",
     "How can I help you today?",

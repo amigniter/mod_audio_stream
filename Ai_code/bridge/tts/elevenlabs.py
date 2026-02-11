@@ -22,10 +22,8 @@ Environment:
 """
 from __future__ import annotations
 
-import io
 import logging
 import ssl
-import struct
 from typing import AsyncIterator, Optional
 
 import aiohttp
@@ -122,9 +120,9 @@ class ElevenLabsTTS(TTSEngine):
                     "Content-Type": "application/json",
                 },
                 timeout=aiohttp.ClientTimeout(
-                    total=30,
+                    total=60,
                     connect=5,
-                    sock_read=10,
+                    sock_read=30,
                 ),
             )
         logger.info("ElevenLabs TTS warmed up: model=%s voice=%s", self._model, self._voice_id)
@@ -192,9 +190,7 @@ class ElevenLabsTTS(TTSEngine):
                     )
                     return
 
-                # Stream PCM chunks as they arrive
                 buffer = bytearray()
-                # Yield in chunks of ~20ms (960 bytes at 24kHz mono 16-bit)
                 chunk_size = self._sample_rate * _CHANNELS * 2 * 20 // 1000
 
                 async for data in resp.content.iter_any():
@@ -212,9 +208,7 @@ class ElevenLabsTTS(TTSEngine):
                             text_fragment=text if chunk_index == 1 else "",
                         )
 
-                # Flush remaining buffer
                 if buffer:
-                    # Ensure even byte count for PCM16
                     if len(buffer) % 2:
                         buffer = buffer[:-1]
                     if buffer:

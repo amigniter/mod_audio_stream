@@ -91,9 +91,8 @@ class TTSEngine(abc.ABC):
                 jitter_buffer.enqueue_pcm(chunk.pcm16)
         """
         ...
-        # Make this an async generator (yield required in abstract body)
         if False:
-            yield  # pragma: no cover
+            yield  
 
     async def warm_up(self) -> None:
         """Optional: pre-load model / warm connection pool.

@@ -79,7 +79,6 @@ class SelfHostedTTS(TTSEngine):
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=self._timeout, connect=5),
             )
-        # Ping health endpoint to verify server is up
         try:
             async with self._session.get(
                 f"{self._base_url}/health",

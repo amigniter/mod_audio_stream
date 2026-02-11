@@ -78,12 +78,18 @@ class FailoverTTSEngine(TTSEngine):
         *,
         voice_id: str | None = None,
     ) -> AsyncIterator[TTSChunk]:
-        """Try each engine in order until one succeeds."""
+        """Try each engine in order until one succeeds.
+
+        IMPORTANT: If an engine yields partial audio then raises an exception,
+        we do NOT fall through to the next engine — that would re-synthesize
+        the full text and cause audio duplication / stutter.  We only fail
+        over when zero chunks have been delivered.
+        """
         last_error: Optional[Exception] = None
 
         for i, engine in enumerate(self._engines):
+            chunk_count = 0
             try:
-                chunk_count = 0
                 t0 = time.monotonic()
                 async for chunk in engine.synthesize_stream(text, voice_id=voice_id):
                     chunk_count += 1
@@ -98,18 +104,24 @@ class FailoverTTSEngine(TTSEngine):
                             engine.name, self._engines[0].name,
                             chunk_count, elapsed_ms, text,
                         )
-                    return  
+                    return  # success
 
                 logger.warning("TTS %s returned 0 chunks for '%.40s'", engine.name, text)
 
             except Exception as e:
                 last_error = e
+                if chunk_count > 0:
+                    logger.warning(
+                        "TTS %s failed AFTER yielding %d chunks for '%.40s': %s "
+                        "— NOT falling through (would duplicate audio)",
+                        engine.name, chunk_count, text, e,
+                    )
+                    return
                 logger.warning(
                     "TTS %s failed for '%.40s': %s — trying next",
                     engine.name, text, e,
                 )
 
-       
         logger.error(
             "All TTS engines failed for '%.60s'. Last error: %s",
             text, last_error,

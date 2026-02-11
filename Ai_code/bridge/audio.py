@@ -1,5 +1,28 @@
 from __future__ import annotations
 import base64
+import logging
+import warnings
+
+logger = logging.getLogger(__name__)
+
+_audioop = None
+try:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        import audioop as _audioop
+except ImportError:
+    try:
+        import audioop_lts as _audioop 
+    except ImportError:
+        pass
+
+
+def tomono_pcm16(pcm: bytes) -> bytes:
+    """Convert stereo PCM16 to mono. Returns unchanged if audioop unavailable."""
+    if _audioop is not None:
+        return _audioop.tomono(pcm, 2, 0.5, 0.5)
+    logger.warning("audioop unavailable — cannot downmix stereo input")
+    return ensure_even_bytes(pcm)
 
 
 def frame_bytes(sample_rate: int, channels: int, frame_ms: int) -> int:

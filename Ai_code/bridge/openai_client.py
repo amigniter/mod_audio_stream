@@ -74,30 +74,23 @@ async def connect_openai_realtime(
         "OpenAI-Beta": "realtime=v1",
     }
 
+    # websockets >=12 uses `additional_headers`; older versions use
+    # `extra_headers`.  Try the modern kwarg first, fall back once.
     ws: Optional[websockets.WebSocketClientProtocol] = None
-    for key in ("extra_headers", "headers", "additional_headers"):
+    for kwarg_name in ("additional_headers", "extra_headers"):
         try:
             ws = await websockets.connect(
                 url, max_size=None, ssl=ssl_ctx,
-                **{key: headers},
+                **{kwarg_name: headers},
             )
             break
-        except TypeError as e:
-            logger.debug("websockets.connect with %s=dict failed: %s", key, e)
+        except TypeError:
+            continue
 
     if ws is None:
-        for key in ("extra_headers", "headers", "additional_headers"):
-            try:
-                ws = await websockets.connect(
-                    url, max_size=None, ssl=ssl_ctx,
-                    **{key: list(headers.items())},
-                )
-                break
-            except TypeError as e:
-                logger.debug("websockets.connect with %s=list failed: %s", key, e)
-
-    if ws is None:
-        raise RuntimeError("Cannot pass headers to websockets — upgrade: pip install websockets>=12")
+        raise RuntimeError(
+            "Cannot pass headers to websockets — upgrade: pip install 'websockets>=12'"
+        )
 
     default_instructions = (
         "You are a warm, friendly voice assistant on a phone call. "

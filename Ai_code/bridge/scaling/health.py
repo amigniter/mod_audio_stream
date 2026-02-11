@@ -31,6 +31,16 @@ _tts_engine = None
 _max_concurrent_calls: int = 100
 
 
+def get_active_calls() -> int:
+    """Return current active call count (safe to call from other modules)."""
+    return _active_calls
+
+
+def get_max_concurrent() -> int:
+    """Return configured max concurrent call limit."""
+    return _max_concurrent_calls
+
+
 def set_tts_engine(engine) -> None:
     global _tts_engine
     _tts_engine = engine
