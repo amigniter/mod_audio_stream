@@ -82,6 +82,27 @@ class BridgeConfig:
     health_port: int = 8766
     max_concurrent_calls: int = 100
 
+    # ── 10X Audio Clarity Pipeline settings ──
+    # ElevenLabs/OpenAI TTS is already broadcast-quality.  Over-processing
+    # with noise gate, spectral sub, de-esser, pre-emphasis, and high-shelf
+    # DEGRADES audio by adding musical noise, gating artifacts, and harshness.
+    # Only DC blocker (always on) + compressor + LPF + soft clipper help
+    # for phone delivery.  Re-enable disabled stages only for noisy mic input.
+    audio_clarity_enabled: bool = True
+    noise_gate_enabled: bool = False       # OFF for TTS — no noise to gate
+    spectral_sub_enabled: bool = False     # OFF for TTS — adds musical noise artifacts
+    de_esser_enabled: bool = False         # OFF for TTS — removes needed sibilance
+    pre_emphasis_enabled: bool = False     # OFF for TTS — aliases after 24→8kHz
+    high_shelf_enabled: bool = False       # OFF for TTS — over-brightens with pre-emph
+    compressor_enabled: bool = True        # ON — consistent loudness on phone
+    low_pass_enabled: bool = True          # ON — anti-alias before 24→8kHz
+    soft_clipper_enabled: bool = True      # ON — gentle warmth, prevents hard clip
+    noise_gate_threshold_db: float = -50.0
+    compressor_threshold_db: float = -24.0   # gentle: only compress loud peaks
+    compressor_ratio: float = 2.0            # gentle: 2:1 preserves natural dynamics
+    compressor_makeup_db: float = 3.0        # modest boost
+    de_esser_threshold_db: float = -20.0
+
 
 def load_config(env_file: str | None = None) -> BridgeConfig:
     """Load config from .env + environment.
@@ -162,6 +183,22 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
     health_port = _env_int("HEALTH_PORT", 8766)
     max_concurrent_calls = _env_int("MAX_CONCURRENT_CALLS", 100)
 
+    # ── 10X Audio Clarity Pipeline settings ──
+    audio_clarity_enabled = _env_bool("AUDIO_CLARITY_ENABLED", True)
+    noise_gate_enabled = _env_bool("NOISE_GATE_ENABLED", False)
+    spectral_sub_enabled = _env_bool("SPECTRAL_SUB_ENABLED", False)
+    de_esser_enabled = _env_bool("DE_ESSER_ENABLED", False)
+    pre_emphasis_enabled = _env_bool("PRE_EMPHASIS_ENABLED", False)
+    high_shelf_enabled = _env_bool("HIGH_SHELF_ENABLED", False)
+    compressor_enabled = _env_bool("COMPRESSOR_ENABLED", True)
+    low_pass_enabled = _env_bool("LOW_PASS_ENABLED", True)
+    soft_clipper_enabled = _env_bool("SOFT_CLIPPER_ENABLED", True)
+    noise_gate_threshold_db = _env_float("NOISE_GATE_THRESHOLD_DB", -50.0)
+    compressor_threshold_db = _env_float("COMPRESSOR_THRESHOLD_DB", -24.0)
+    compressor_ratio = _env_float("COMPRESSOR_RATIO", 2.0)
+    compressor_makeup_db = _env_float("COMPRESSOR_MAKEUP_DB", 3.0)
+    de_esser_threshold_db = _env_float("DE_ESSER_THRESHOLD_DB", -20.0)
+
     use_custom_tts = tts_provider != "none"
     if use_custom_tts:
         logger.info(
@@ -236,4 +273,18 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
         tts_cache_ttl_s=tts_cache_ttl_s,
         health_port=health_port,
         max_concurrent_calls=max_concurrent_calls,
+        audio_clarity_enabled=audio_clarity_enabled,
+        noise_gate_enabled=noise_gate_enabled,
+        spectral_sub_enabled=spectral_sub_enabled,
+        de_esser_enabled=de_esser_enabled,
+        pre_emphasis_enabled=pre_emphasis_enabled,
+        high_shelf_enabled=high_shelf_enabled,
+        compressor_enabled=compressor_enabled,
+        low_pass_enabled=low_pass_enabled,
+        soft_clipper_enabled=soft_clipper_enabled,
+        noise_gate_threshold_db=noise_gate_threshold_db,
+        compressor_threshold_db=compressor_threshold_db,
+        compressor_ratio=compressor_ratio,
+        compressor_makeup_db=compressor_makeup_db,
+        de_esser_threshold_db=de_esser_threshold_db,
     )

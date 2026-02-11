@@ -46,6 +46,7 @@ from .audio import (
     crossfade_pcm16,
     DCBlocker,
     ComfortNoiseGenerator,
+    AudioClarityPipeline,
     peak_dbfs,
 )
 from .config import BridgeConfig
@@ -132,12 +133,31 @@ class JitterBuffer:
             return self._frames.popleft()
         return None
 
+    def flush_remainder(self) -> int:
+        """Zero-pad any partial remainder to a full frame and enqueue it.
+
+        MUST be called when no more audio is expected (end of TTS response)
+        to prevent orphaned bytes from stalling the playout loop indefinitely.
+        Returns number of remainder bytes that were flushed (0 if nothing).
+        """
+        if not self._remainder:
+            return 0
+        remaining = len(self._remainder)
+        pad_needed = self._frame_bytes - remaining
+        self._remainder.extend(b'\x00' * pad_needed)
+        self._frames.append(bytes(self._remainder))
+        self._remainder.clear()
+        self._total_enqueued += 1
+        self._data_event.set()
+        return remaining
+
     def clear(self) -> int:
         """Clear all buffered data.  Returns bytes cleared."""
         n = len(self._frames) * self._frame_bytes + len(self._remainder)
         self._frames.clear()
         self._remainder.clear()
         self._arrival_times.clear()
+        self._data_event.clear()
         return n
 
     @property
@@ -422,8 +442,72 @@ class CallSession:
         )
 
         self._dc_blocker = DCBlocker(alpha=0.9975)       
-        self._comfort_noise = ComfortNoiseGenerator(level_dbfs=-70.0)
+        self._comfort_noise = ComfortNoiseGenerator(level_dbfs=-55.0)
         self._last_playout_frame: bytes = b""             
+
+        # ── 10X Audio Clarity Pipeline ──
+        # IMPORTANT: ElevenLabs/OpenAI TTS output is ALREADY broadcast-quality.
+        # Over-processing with 9 DSP stages DEGRADES quality by adding artifacts:
+        #   - Spectral subtractor adds "musical noise" buzzing at frame boundaries
+        #   - Noise gate clips soft consonant tails ("th", "f", "s" sounds)
+        #   - Pre-emphasis + high-shelf stacking = over-bright, harsh on phone
+        #   - De-esser removes natural sibilance needed for intelligibility
+        #
+        # For clean TTS audio, only 4 stages are beneficial:
+        #   1. DC Blocker  — prevents clicks at segment boundaries
+        #   2. Compressor  — consistent loudness on phone speakers
+        #   3. Low-Pass    — anti-aliasing before 24→8kHz resample
+        #   4. Soft Clipper — gentle warmth (replaces hard clip)
+        #
+        # Noise gate, spectral sub, de-esser, pre-emphasis, high-shelf
+        # are DISABLED by default for TTS audio.  Enable them only for
+        # noisy real-time microphone input.
+        self._clarity_pipeline: Optional[AudioClarityPipeline] = None
+        _clarity_enabled = getattr(cfg, 'audio_clarity_enabled', True)
+        if _clarity_enabled:
+            self._clarity_pipeline = AudioClarityPipeline(
+                sample_rate=openai_out_rate,
+                # DISABLED — harmful for clean TTS audio:
+                enable_noise_gate=getattr(cfg, 'noise_gate_enabled', False),
+                enable_spectral_sub=getattr(cfg, 'spectral_sub_enabled', False),
+                enable_de_esser=getattr(cfg, 'de_esser_enabled', False),
+                enable_pre_emphasis=getattr(cfg, 'pre_emphasis_enabled', False),
+                enable_high_shelf=getattr(cfg, 'high_shelf_enabled', False),
+                # ENABLED — essential for phone delivery:
+                enable_compressor=getattr(cfg, 'compressor_enabled', True),
+                enable_low_pass=getattr(cfg, 'low_pass_enabled', True),
+                enable_soft_clipper=getattr(cfg, 'soft_clipper_enabled', True),
+                # Compressor: gentle, preserves dynamics
+                compressor_threshold_db=getattr(cfg, 'compressor_threshold_db', -24.0),
+                compressor_ratio=getattr(cfg, 'compressor_ratio', 2.0),
+                compressor_makeup_db=getattr(cfg, 'compressor_makeup_db', 3.0),
+                # Low-pass: anti-alias for 24→8kHz (Nyquist = 4kHz)
+                low_pass_cutoff_hz=3800.0,
+                # Soft clipper: very gentle warmth
+                soft_clip_drive=0.6,
+                # Defaults for disabled stages (harmless, used if re-enabled)
+                noise_gate_threshold_db=getattr(cfg, 'noise_gate_threshold_db', -50.0),
+                de_esser_threshold_db=getattr(cfg, 'de_esser_threshold_db', -20.0),
+                noise_gate_hold_ms=100.0,
+                pre_emphasis_alpha=0.5,
+                high_shelf_cutoff_hz=2500.0,
+                high_shelf_gain_db=1.5,
+                spectral_over_subtraction=1.5,
+                spectral_floor=0.04,
+                de_esser_ratio=3.0,
+            )
+            logger.info(
+                "10X Audio Clarity Pipeline ACTIVE: noise_gate=%s spectral=%s "
+                "de_esser=%s pre_emph=%s shelf=%s compressor=%s lpf=%s soft_clip=%s",
+                getattr(cfg, 'noise_gate_enabled', True),
+                getattr(cfg, 'spectral_sub_enabled', True),
+                getattr(cfg, 'de_esser_enabled', True),
+                getattr(cfg, 'pre_emphasis_enabled', True),
+                getattr(cfg, 'high_shelf_enabled', True),
+                getattr(cfg, 'compressor_enabled', True),
+                getattr(cfg, 'low_pass_enabled', True),
+                getattr(cfg, 'soft_clipper_enabled', True),
+            )
 
         self._metrics = CallMetrics(
             call_id=uuid.uuid4().hex[:12],
@@ -452,6 +536,7 @@ class CallSession:
         self._tts_voice_id = cfg.tts_voice_id or ""
         self._tts_queue: asyncio.Queue[str | None] = asyncio.Queue()
         self._tts_worker_task: Optional[asyncio.Task] = None
+        self._sentence_timeout_handle: Optional[asyncio.TimerHandle] = None
 
         if self._use_custom_tts:
             self._sentence_buffer = SentenceBuffer(
@@ -472,8 +557,12 @@ class CallSession:
         if self._tts_cache is not None:
             cached = await self._tts_cache.get(text, self._tts_voice_id)
             if cached is not None:
-                clean = self._dc_blocker.process(cached.pcm16)
-                self._jbuf.enqueue_pcm(clean)
+                # Cache contains DC-blocked audio from original synthesis.
+                # Still apply clarity pipeline for compression/limiting/EQ.
+                pcm_out = cached.pcm16
+                if self._clarity_pipeline is not None:
+                    pcm_out = self._clarity_pipeline.process(pcm_out)
+                self._jbuf.enqueue_pcm(pcm_out)
                 self._metrics.tts_cache_hits += 1
                 logger.debug("TTS cache hit: '%s' (%d bytes)", text[:40], len(cached.pcm16))
                 return
@@ -491,10 +580,20 @@ class CallSession:
                 if pcm:
                     if chunk_count == 0:
                         first_chunk_t = time.monotonic()
-                    pcm = self._dc_blocker.process(pcm)
+                    # 10X Audio Clarity: full DSP chain on TTS output
+                    # (includes DC blocker as Stage 1 — no separate DC block needed)
+                    if self._clarity_pipeline is not None:
+                        pcm = self._clarity_pipeline.process(pcm)
+                    else:
+                        pcm = self._dc_blocker.process(pcm)
                     self._jbuf.enqueue_pcm(pcm)
                     pcm_parts.append(pcm)
                     chunk_count += 1
+                    # Inline backpressure: pause mid-sentence if buffer is full.
+                    # Without this, a single long sentence (200+ chunks, ~4s audio)
+                    # can blow past the per-sentence backpressure check.
+                    if chunk_count % 20 == 0:  # check every ~20 chunks
+                        await self._tts_wait_for_buffer_drain()
         except Exception:
             logger.exception("TTS synthesis failed for '%.60s'", text)
             self._metrics.tts_errors += 1
@@ -520,19 +619,68 @@ class CallSession:
                 synthesis_ms=elapsed_ms,
             )
 
+    # Maximum buffered audio before TTS synthesis pauses (backpressure).
+    # Tighter limits prevent buffer bloat on long responses (stories).
+    # A single sentence can produce 200+ chunks (~4s audio), so we need
+    # low thresholds to catch bloat before it compounds.
+    _TTS_BUFFER_HIGH_WATER_MS = 6_000    # pause TTS when buffer > 6s
+    _TTS_BUFFER_LOW_WATER_MS = 3_000     # resume TTS when buffer < 3s
+
+    async def _tts_wait_for_buffer_drain(self) -> None:
+        """Backpressure: pause TTS synthesis while jitter buffer is full.
+
+        Without this, a long AI response (e.g., a story) synthesizes all
+        20+ sentences immediately, flooding the buffer with 76+ seconds
+        of audio.  That wastes TTS API calls on barge-in and uses
+        excessive memory.
+
+        Strategy: if buffer > 6s, sleep until it drains below 3s.
+        Uses low-water mark for hysteresis (prevents rapid on/off).
+        """
+        if self._jbuf.buffered_ms <= self._TTS_BUFFER_HIGH_WATER_MS:
+            return
+        logger.debug(
+            "TTS backpressure: buffer=%.0fms > %dms, pausing synthesis",
+            self._jbuf.buffered_ms, self._TTS_BUFFER_HIGH_WATER_MS,
+        )
+        while self._jbuf.buffered_ms > self._TTS_BUFFER_LOW_WATER_MS:
+            await asyncio.sleep(0.1)  # 100ms poll — playout drains 1 frame/20ms
+        logger.debug(
+            "TTS backpressure: buffer=%.0fms < %dms, resuming synthesis",
+            self._jbuf.buffered_ms, self._TTS_BUFFER_LOW_WATER_MS,
+        )
+
     async def _tts_worker(self) -> None:
-        """Serial worker: pulls sentences off the queue one at a time."""
+        """Serial worker: pulls sentences off the queue one at a time.
+
+        After each sentence, if the queue is empty (last sentence done),
+        flush any orphaned remainder bytes so the playout loop doesn't
+        stall on a partial frame.
+
+        Includes backpressure: waits for buffer to drain before
+        synthesizing the next sentence to prevent buffer bloat.
+        """
         try:
             while True:
                 text = await self._tts_queue.get()
                 if text is None:
                     break
                 try:
+                    # Backpressure: wait if buffer is already full
+                    await self._tts_wait_for_buffer_drain()
                     await self._synthesize_and_enqueue(text)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
                     logger.exception("TTS worker error for '%.60s'", text)
+                finally:
+                    if self._tts_queue.empty():
+                        flushed = self._jbuf.flush_remainder()
+                        if flushed > 0:
+                            logger.debug(
+                                "TTS worker: flushed %d orphaned remainder bytes",
+                                flushed,
+                            )
         except asyncio.CancelledError:
             return
 
@@ -549,8 +697,33 @@ class CallSession:
             if remaining:
                 self._schedule_tts(remaining)
 
+    async def _deferred_remainder_flush(self) -> None:
+        """Wait for TTS queue to drain, then flush any orphaned remainder.
+
+        Called after response.done to ensure the very last TTS chunk's
+        partial frame gets zero-padded and enqueued.  Without this, the
+        playout loop stalls forever on 'Re-prebuffer timeout' with
+        remainder bytes that never form a complete frame.
+        """
+        try:
+            for _ in range(100):  # max 10 seconds (100 × 100ms)
+                if self._tts_queue.empty() and (
+                    self._tts_worker_task is None or self._tts_worker_task.done()
+                ):
+                    break
+                await asyncio.sleep(0.1)
+            flushed = self._jbuf.flush_remainder()
+            if flushed > 0:
+                logger.debug("Deferred flush: %d remainder bytes after response done", flushed)
+        except asyncio.CancelledError:
+            pass
+
     async def _cancel_tts_tasks(self) -> None:
-        """Cancel all in-flight TTS synthesis (barge-in)."""
+        """Cancel all in-flight TTS synthesis (barge-in).
+
+        Uses bounded wait (1s) to prevent hanging if TTS HTTP is stuck.
+        """
+        # Drain the queue first (non-blocking)
         while not self._tts_queue.empty():
             try:
                 self._tts_queue.get_nowait()
@@ -560,13 +733,18 @@ class CallSession:
         if self._tts_worker_task is not None and not self._tts_worker_task.done():
             self._tts_worker_task.cancel()
             try:
-                await self._tts_worker_task
-            except (asyncio.CancelledError, Exception):
+                await asyncio.wait_for(self._tts_worker_task, timeout=1.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
         self._tts_worker_task = None
 
         if self._sentence_buffer is not None:
             self._sentence_buffer.flush()
+
+        # Cancel sentence timeout if pending
+        if self._sentence_timeout_handle is not None:
+            self._sentence_timeout_handle.cancel()
+            self._sentence_timeout_handle = None
 
     async def _send_item_audio_and_respond(self, reason: str) -> None:
         if self._response_in_flight:
@@ -653,20 +831,36 @@ class CallSession:
 
     
     async def _wait_for_audio(self, target_bytes: int, timeout_s: float, label: str) -> None:
-        """Block until JitterBuffer has at least target_bytes, or timeout.
+        """Block until JitterBuffer has at least target_bytes of COMPLETE FRAMES, or timeout.
 
         Uses asyncio.Event (signaled by enqueue_pcm) instead of polling,
         so zero CPU is consumed while waiting for TTS/OpenAI audio.
+
+        Critical fix: when timeout expires with remainder bytes but zero
+        complete frames, flush the remainder as a zero-padded frame to
+        prevent the playout loop from spinning forever.
         """
         deadline = time.monotonic() + timeout_s
         while self._jbuf.buffered_bytes < target_bytes:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                if self._jbuf.buffered_bytes > 0:
+                if self._jbuf.buffered_frames > 0:
                     logger.debug(
-                        "%s timeout (%.1fs) — starting with %d/%d bytes",
+                        "%s timeout (%.1fs) — starting with %d/%d bytes (%d frames)",
                         label, timeout_s, self._jbuf.buffered_bytes, target_bytes,
+                        self._jbuf.buffered_frames,
                     )
+                    break
+                # Have remainder bytes but zero complete frames — flush to prevent stall
+                if self._jbuf.buffered_bytes > 0:
+                    flushed = self._jbuf.flush_remainder()
+                    if flushed > 0:
+                        logger.debug(
+                            "%s timeout: flushed %d orphaned remainder bytes to frame",
+                            label, flushed,
+                        )
+                    break
+                # Truly empty — nothing to play
                 break
             self._jbuf._data_event.clear()
             try:
@@ -716,10 +910,10 @@ class CallSession:
         CROSSFADE_SAMPLES = 160          # ~6.7ms at 24kHz — smooth segment stitching
 
         if self._use_custom_tts:
-            INITIAL_PREBUFFER_MS = max(cfg.playout_prebuffer_ms, 200)
+            INITIAL_PREBUFFER_MS = max(cfg.playout_prebuffer_ms, 100)
             REBUFFER_MS_BASE = 120
         else:
-            INITIAL_PREBUFFER_MS = max(cfg.playout_prebuffer_ms, 60)
+            INITIAL_PREBUFFER_MS = max(cfg.playout_prebuffer_ms, 40)
             REBUFFER_MS_BASE = 40
 
         initial_prebuffer_bytes = ceil_to_frame(
@@ -763,6 +957,21 @@ class CallSession:
                     if jbuf.buffered_frames == 0:
                         underruns += 1
                         self._metrics.playout_underruns += 1
+                        # Send comfort noise to keep RTP stream alive
+                        # (prevents echo-canceller loss + dead air detection)
+                        cn_frame = self._comfort_noise.generate(out_frame_bytes)
+                        if cfg.fs_send_json_audio:
+                            payload = fs_stream_audio_json(
+                                cn_frame, contract,
+                                sample_rate_override=openai_out_rate,
+                                channels_override=openai_out_channels,
+                            )
+                        else:
+                            payload = cn_frame
+                        try:
+                            await self._upstream_ws.send(payload)
+                        except Exception:
+                            pass
                         await asyncio.sleep(step_s)
                         next_t = time.monotonic() + step_s
                         continue
@@ -780,8 +989,16 @@ class CallSession:
                     await asyncio.sleep(sleep_s)
 
                 now = time.monotonic()
-                if now - next_t > step_s * 2:
-                    next_t = now          
+                # Jitter compensation: if event loop was delayed by more
+                # than 2 ticks, snap clock forward to prevent burst-playing
+                # which causes packet loss at FreeSWITCH side.
+                drift = now - next_t
+                if drift > step_s * 2:
+                    next_t = now
+                elif drift > step_s * 0.5:
+                    # Moderate drift: send current frame but don't burst.
+                    # Advance clock by one step only (absorb delay gradually).
+                    next_t = now
                 next_t += step_s
 
 
@@ -796,16 +1013,20 @@ class CallSession:
                     # crossfade_pcm16 handles segment stitching.
 
                     if _fade_pos == 0 and self._last_playout_frame:
-                        # Crossfade from the last frame before the gap to
-                        # the first frame after resume — eliminates the
-                        # click at the underrun boundary.
-                        frame = crossfade_pcm16(
-                            self._last_playout_frame, frame,
-                            overlap_samples=min(CROSSFADE_SAMPLES, len(frame) // 2),
-                        )
-                        # After crossfade, skip fade-in — crossfade already
-                        # provides a smooth transition.
-                        _fade_pos = FADE_IN_FRAMES
+                        # Only crossfade if last frame had real audio content
+                        # (not comfort noise or near-silence).  Otherwise
+                        # crossfading with silence produces a muffled onset.
+                        last_peak = peak_dbfs(self._last_playout_frame)
+                        if last_peak > -50.0:
+                            frame = crossfade_pcm16(
+                                self._last_playout_frame, frame,
+                                overlap_samples=min(CROSSFADE_SAMPLES, len(frame) // 2),
+                            )
+                            _fade_pos = FADE_IN_FRAMES
+                        else:
+                            # Last frame was silence/CN — just fade in
+                            frame = fade_in_pcm16(frame, 0, FADE_IN_FRAMES)
+                            _fade_pos = FADE_IN_FRAMES
 
                     if _fade_pos < FADE_IN_FRAMES:
                         frame = fade_in_pcm16(frame, _fade_pos, FADE_IN_FRAMES)
@@ -827,6 +1048,20 @@ class CallSession:
                 else:
                     underruns += 1
                     self._metrics.playout_underruns += 1
+                    # Send comfort noise for inline underrun too
+                    cn_frame = self._comfort_noise.generate(out_frame_bytes)
+                    if cfg.fs_send_json_audio:
+                        payload = fs_stream_audio_json(
+                            cn_frame, contract,
+                            sample_rate_override=openai_out_rate,
+                            channels_override=openai_out_channels,
+                        )
+                    else:
+                        payload = cn_frame
+                    try:
+                        await self._upstream_ws.send(payload)
+                    except Exception:
+                        pass
 
                 now_s = time.monotonic()
                 if now_s - last_stats_t >= 5.0:
@@ -878,6 +1113,40 @@ class CallSession:
                 for sentence in sentences:
                     logger.debug("TTS sentence: '%s'", sentence[:60])
                     self._schedule_tts(sentence)
+                    # Cancel any pending sentence timeout since we just flushed
+                    if self._sentence_timeout_handle is not None:
+                        self._sentence_timeout_handle.cancel()
+                        self._sentence_timeout_handle = None
+
+                # If buffer still has unflushed text with no sentence boundary,
+                # schedule a timeout flush (500ms) to prevent long unpunctuated
+                # phrases from stalling the TTS pipeline.
+                if self._sentence_buffer.pending_chars > 0:
+                    self._schedule_sentence_timeout()
+
+    def _schedule_sentence_timeout(self) -> None:
+        """After 500ms with no sentence boundary, flush partial text to TTS.
+
+        This prevents long unpunctuated phrases (e.g., "The capital of India
+        is New Delhi") from accumulating until max_chars, reducing latency
+        by ~200-400ms for typical phrases.
+        """
+        if self._sentence_timeout_handle is not None:
+            self._sentence_timeout_handle.cancel()
+
+        def _timeout_flush() -> None:
+            self._sentence_timeout_handle = None
+            if self._sentence_buffer is not None and self._sentence_buffer.pending_chars > 0:
+                text = self._sentence_buffer.flush()
+                if text:
+                    logger.debug("TTS sentence (timeout flush): '%s'", text[:60])
+                    self._schedule_tts(text)
+
+        try:
+            loop = asyncio.get_running_loop()
+            self._sentence_timeout_handle = loop.call_later(0.5, _timeout_flush)
+        except RuntimeError:
+            pass
 
     async def _handle_response_done(self) -> None:
         self._ai_text_buf.clear()
@@ -887,6 +1156,14 @@ class CallSession:
 
         if self._use_custom_tts:
             await self._flush_sentence_buffer()
+            # Cancel any pending sentence timeout
+            if self._sentence_timeout_handle is not None:
+                self._sentence_timeout_handle.cancel()
+                self._sentence_timeout_handle = None
+            # Schedule a deferred flush: the TTS worker may still be
+            # synthesizing the last sentence.  Once it finishes, any
+            # orphaned remainder bytes must be flushed.
+            asyncio.create_task(self._deferred_remainder_flush())
 
         if self._first_audio_chunk_t > 0 and self._metrics.start_time > 0:
             first_audio_latency = (self._first_audio_chunk_t - self._metrics.start_time) * 1000
@@ -931,7 +1208,12 @@ class CallSession:
         if src_ch != 1:
             pcm = tomono_pcm16(pcm)
 
-        pcm = self._dc_blocker.process(pcm)
+        # 10X Audio Clarity: full DSP chain on OpenAI audio output
+        # (includes DC blocker as Stage 1 — no separate DC block needed)
+        if self._clarity_pipeline is not None:
+            pcm = self._clarity_pipeline.process(pcm)
+        else:
+            pcm = self._dc_blocker.process(pcm)
 
         self._jbuf.enqueue_pcm(pcm)
 
@@ -939,6 +1221,12 @@ class CallSession:
         """Barge-in: user started speaking — clear buffer and cancel TTS."""
         self._metrics.barge_in_count += 1
         cleared = self._jbuf.clear()
+        # Reset DC blocker state to prevent filter discontinuity
+        # when new audio arrives after barge-in
+        self._dc_blocker.reset()
+        # Reset 10X Audio Clarity pipeline state (all DSP filters)
+        if self._clarity_pipeline is not None:
+            self._clarity_pipeline.reset()
         if cleared > 0:
             cleared_ms = (
                 (cleared / self._out_frame_bytes) * self._contract.frame_ms
@@ -1123,10 +1411,10 @@ async def handle_call(
         exc = t.exception()
         if exc is not None:
             logger.info("Task failed: %s", exc)
-        if t is to_fs and exc is None:
+        elif t is to_fs:
             try:
-                session: CallSession = t.result()
-                if hasattr(session, "_metrics") and session._metrics is not None:
+                session = t.result()
+                if isinstance(session, CallSession) and session._metrics is not None:
                     session._metrics.finalize()
                     session._metrics.log_summary()
             except Exception:
