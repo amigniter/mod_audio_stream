@@ -65,6 +65,23 @@ class BridgeConfig:
     temperature: float
     system_instructions: str
 
+    tts_provider: str = "none"
+    tts_api_key: str = ""
+    tts_voice_id: str = ""
+    tts_model: str = ""
+    tts_fallback_provider: str = "openai"
+    tts_fallback_api_key: str = ""
+    tts_fallback_voice_id: str = ""
+    tts_fallback_model: str = ""
+    tts_selfhosted_url: str = ""
+    tts_sentence_max_chars: int = 80
+    tts_sentence_min_chars: int = 10
+    tts_cache_enabled: bool = True
+    tts_cache_max_entries: int = 500
+    tts_cache_ttl_s: float = 3600.0
+    health_port: int = 8766
+    max_concurrent_calls: int = 100
+
 
 def load_config(env_file: str | None = None) -> BridgeConfig:
     """Load config from .env + environment.
@@ -120,18 +137,39 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
 
     openai_wss_insecure = _env_bool("OPENAI_WSS_INSECURE", False)
 
-    # ── VAD tuning — critical for natural conversation flow ──
-    # Lower silence_duration = faster response, feels more human
-    # Higher prefix_padding = captures more word beginnings
     vad_threshold = _env_float("VAD_THRESHOLD", 0.5)
     vad_prefix_padding_ms = _env_int("VAD_PREFIX_PADDING_MS", 300)
     vad_silence_duration_ms = _env_int("VAD_SILENCE_DURATION_MS", 300)
 
-    # ── AI behavior ──
-    # Lower temperature = more consistent, natural-sounding voice
-    # 0.6 is the sweet spot: natural variation without erratic changes
     temperature = _env_float("OPENAI_TEMPERATURE", 0.6)
     system_instructions = os.getenv("OPENAI_SYSTEM_INSTRUCTIONS", "").strip()
+
+    # ── Custom TTS settings ──
+    tts_provider = os.getenv("TTS_PROVIDER", "none").strip().lower()
+    tts_api_key = os.getenv("TTS_API_KEY", "").strip()
+    tts_voice_id = os.getenv("TTS_VOICE_ID", "").strip()
+    tts_model = os.getenv("TTS_MODEL", "").strip()
+    tts_fallback_provider = os.getenv("TTS_FALLBACK_PROVIDER", "openai").strip().lower()
+    tts_fallback_api_key = os.getenv("TTS_FALLBACK_API_KEY", "").strip()
+    tts_fallback_voice_id = os.getenv("TTS_FALLBACK_VOICE_ID", "").strip()
+    tts_fallback_model = os.getenv("TTS_FALLBACK_MODEL", "").strip()
+    tts_selfhosted_url = os.getenv("TTS_SELFHOSTED_URL", "").strip()
+    tts_sentence_max_chars = _env_int("TTS_SENTENCE_MAX_CHARS", 80)
+    tts_sentence_min_chars = _env_int("TTS_SENTENCE_MIN_CHARS", 10)
+    tts_cache_enabled = _env_bool("TTS_CACHE_ENABLED", True)
+    tts_cache_max_entries = _env_int("TTS_CACHE_MAX_ENTRIES", 500)
+    tts_cache_ttl_s = _env_float("TTS_CACHE_TTL_S", 3600.0)
+    health_port = _env_int("HEALTH_PORT", 8766)
+    max_concurrent_calls = _env_int("MAX_CONCURRENT_CALLS", 100)
+
+    use_custom_tts = tts_provider != "none"
+    if use_custom_tts:
+        logger.info(
+            "Custom TTS enabled: provider=%s voice_id=%s model=%s fallback=%s",
+            tts_provider, tts_voice_id or "(default)", tts_model or "(default)", tts_fallback_provider,
+        )
+        if not tts_api_key and tts_provider not in ("selfhosted", "openai"):
+            logger.warning("TTS_PROVIDER=%s but TTS_API_KEY is not set", tts_provider)
 
     if fs_sample_rate != openai_input_sample_rate and not openai_resample_input:
         logger.warning(
@@ -182,4 +220,20 @@ def load_config(env_file: str | None = None) -> BridgeConfig:
         vad_silence_duration_ms=vad_silence_duration_ms,
         temperature=temperature,
         system_instructions=system_instructions,
+        tts_provider=tts_provider,
+        tts_api_key=tts_api_key,
+        tts_voice_id=tts_voice_id,
+        tts_model=tts_model,
+        tts_fallback_provider=tts_fallback_provider,
+        tts_fallback_api_key=tts_fallback_api_key,
+        tts_fallback_voice_id=tts_fallback_voice_id,
+        tts_fallback_model=tts_fallback_model,
+        tts_selfhosted_url=tts_selfhosted_url,
+        tts_sentence_max_chars=tts_sentence_max_chars,
+        tts_sentence_min_chars=tts_sentence_min_chars,
+        tts_cache_enabled=tts_cache_enabled,
+        tts_cache_max_entries=tts_cache_max_entries,
+        tts_cache_ttl_s=tts_cache_ttl_s,
+        health_port=health_port,
+        max_concurrent_calls=max_concurrent_calls,
     )

@@ -19,9 +19,6 @@ from .audio import ensure_even_bytes
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────
-#  Detect available backends
-# ─────────────────────────────────────────────────────────────────
 _HAS_NUMPY = False
 try:
     import numpy as _np
@@ -51,7 +48,7 @@ try:
     _HAS_AUDIOOP = True
 except ImportError:
     try:
-        import audioop_lts as _audioop  # type: ignore
+        import audioop_lts as _audioop  
         _HAS_AUDIOOP = True
     except ImportError:
         pass
@@ -68,9 +65,6 @@ def get_backend() -> str:
     return "none"
 
 
-# ─────────────────────────────────────────────────────────────────
-#  Unified Resampler class
-# ─────────────────────────────────────────────────────────────────
 class Resampler:
     """Stateful PCM16 resampler.
 
@@ -87,7 +81,7 @@ class Resampler:
         self.out_rate = out_rate
         self.channels = channels
         self._backend = get_backend()
-        self._state: object = None  # backend-specific state
+        self._state: object = None  
 
         if in_rate == out_rate:
             self._backend = "passthrough"
@@ -95,9 +89,6 @@ class Resampler:
             return
 
         if self._backend == "soxr":
-            # soxr.ResampleStream needs large chunks to produce output.
-            # For small 20ms frames (160 samples) it buffers internally
-            # and returns EMPTY — use block mode instead which always works.
             self._backend = "soxr_block"
             logger.info(
                 "Resampler: soxr block %d->%d Hz (sinc/broadcast quality)",
@@ -118,7 +109,7 @@ class Resampler:
                 self._backend = "audioop"
 
         if self._backend == "audioop":
-            self._state = None  # audioop.ratecv state
+            self._state = None  
             logger.info(
                 "Resampler: audioop (linear interp) %d->%d Hz — "
                 "install soxr+numpy for better quality",
@@ -153,7 +144,6 @@ class Resampler:
 
         return pcm
 
-    # ── soxr block mode (stateless, broadcast quality) ──
     def _process_soxr_block(self, pcm: bytes) -> bytes:
         arr = _np.frombuffer(pcm, dtype=_np.int16)
         if self.channels > 1:
@@ -161,7 +151,6 @@ class Resampler:
         out = _soxr.resample(arr, self.in_rate, self.out_rate)
         return out.astype(_np.int16).tobytes()
 
-    # ── samplerate/libsamplerate (stateful, good quality) ──
     def _process_samplerate(self, pcm: bytes) -> bytes:
         arr = _np.frombuffer(pcm, dtype=_np.int16).astype(_np.float32) / 32768.0
         if self.channels > 1:
@@ -171,7 +160,6 @@ class Resampler:
         out_i16 = _np.clip(out * 32768.0, -32768, 32767).astype(_np.int16)
         return out_i16.tobytes()
 
-    # ── audioop (stateful, lowest quality — linear interpolation) ──
     def _process_audioop(self, pcm: bytes) -> bytes:
         converted, self._state = _audioop.ratecv(
             pcm, 2, self.channels,

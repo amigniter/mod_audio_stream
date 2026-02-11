@@ -62,10 +62,9 @@ async def run_connection(ws, in_sr: int, in_ch: int) -> None:
     frame_ms = int(os.getenv("FRAME_MS", "20"))
     max_buf_ms = int(os.getenv("PLAYOUT_BUFFER_MS", "500"))
 
-    frame_bytes = in_sr * 2 * in_ch * frame_ms // 1000  # bytes per frame
+    frame_bytes = in_sr * 2 * in_ch * frame_ms // 1000  
     max_buf_bytes = in_sr * 2 * in_ch * max_buf_ms // 1000
 
-    # Use a bytearray as a simple ring buffer — always frame-aligned
     buf = bytearray()
 
     stats_frames_in = 0
@@ -88,7 +87,6 @@ async def run_connection(ws, in_sr: int, in_ch: int) -> None:
             if not echo_enabled:
                 continue
 
-            # Apply gain
             if echo_gain != 1.0:
                 try:
                     pcm = audioop.mul(pcm, 2, echo_gain)
@@ -97,11 +95,9 @@ async def run_connection(ws, in_sr: int, in_ch: int) -> None:
 
             stats_frames_in += 1
 
-            # Append to buffer, drop oldest if over cap
             buf.extend(pcm)
             if len(buf) > max_buf_bytes:
                 overflow = len(buf) - max_buf_bytes
-                # Align to frame boundary
                 overflow = (overflow // frame_bytes) * frame_bytes
                 if overflow > 0:
                     del buf[:overflow]
@@ -123,12 +119,10 @@ async def run_connection(ws, in_sr: int, in_ch: int) -> None:
             if now < next_t:
                 await asyncio.sleep(next_t - now)
 
-            # Reset clock if we've drifted too far behind (>3 frames)
             if time.monotonic() - next_t > step_s * 3:
                 next_t = time.monotonic()
             next_t += step_s
 
-            # Send exactly 1 frame
             if len(buf) >= frame_bytes:
                 frame = bytes(buf[:frame_bytes])
                 del buf[:frame_bytes]

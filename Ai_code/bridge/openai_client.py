@@ -43,7 +43,7 @@ def build_ssl_context(wss_pem: str, insecure: bool) -> ssl.SSLContext:
         import certifi
         ctx.load_verify_locations(cafile=certifi.where())
     except Exception:
-        pass  # Fall back to system CAs
+        pass  
 
     return ctx
 
@@ -54,15 +54,19 @@ async def connect_openai_realtime(
     model: str,
     voice: str,
     ssl_ctx: ssl.SSLContext,
-    # ── VAD tuning (controls when AI thinks user stopped talking) ──
     vad_threshold: float = 0.5,
     vad_prefix_padding_ms: int = 300,
     vad_silence_duration_ms: int = 500,
-    # ── AI behavior ──
     temperature: float = 0.8,
     system_instructions: str = "",
+    text_only_mode: bool = False,
 ) -> websockets.WebSocketClientProtocol:
-    """Connect to OpenAI Realtime API and configure session for phone-quality voice."""
+    """Connect to OpenAI Realtime API and configure session.
+
+    When text_only_mode=True, the session uses modalities=["text"] so
+    OpenAI returns only text responses (no audio). This is ~3-5x faster
+    and allows using a custom TTS engine for voice synthesis.
+    """
 
     url = f"wss://api.openai.com/v1/realtime?model={model}"
     headers = {
@@ -70,7 +74,6 @@ async def connect_openai_realtime(
         "OpenAI-Beta": "realtime=v1",
     }
 
-    # Try different header parameter names for websockets compatibility
     ws: Optional[websockets.WebSocketClientProtocol] = None
     for key in ("extra_headers", "headers", "additional_headers"):
         try:
@@ -96,15 +99,6 @@ async def connect_openai_realtime(
     if ws is None:
         raise RuntimeError("Cannot pass headers to websockets — upgrade: pip install websockets>=12")
 
-    # ── Configure session for maximum voice quality ──
-    #
-    # This is THE key to matching ChatGPT Voice quality.
-    # ChatGPT has all these tuned internally. We set them explicitly.
-    #
-    # The system instructions MUST tell the model HOW to speak, not just
-    # what to say.  Without prosody/emotion guidance, the model defaults
-    # to a flat, robotic cadence.
-    #
     default_instructions = (
         "You are a warm, friendly voice assistant on a phone call. "
         "Speak exactly like a real human would — with natural rhythm, "
@@ -118,52 +112,42 @@ async def connect_openai_realtime(
         "If they're calm, be calm and reassuring."
     )
 
+    if text_only_mode:
+        modalities = ["text"]
+        logger.info("OpenAI session: TEXT-ONLY mode (custom TTS will handle audio)")
+    else:
+        modalities = ["audio", "text"]
+
+    session_config = {
+        "input_audio_format": "pcm16",
+
+        "voice": voice,
+        "modalities": modalities,
+
+        "turn_detection": {
+            "type": "server_vad",
+            "create_response": True,
+            "threshold": vad_threshold,
+            "prefix_padding_ms": vad_prefix_padding_ms,
+            "silence_duration_ms": vad_silence_duration_ms,
+        },
+
+        "input_audio_transcription": {
+            "model": "gpt-4o-mini-transcribe",
+            "language": "en",
+        },
+
+        "temperature": temperature,
+
+        "instructions": system_instructions or default_instructions,
+    }
+
+    if not text_only_mode:
+        session_config["output_audio_format"] = "pcm16"
+
     session_update = {
         "type": "session.update",
-        "session": {
-            # ── Audio format: 24kHz PCM16 = maximum quality ──
-            "input_audio_format": "pcm16",
-            "output_audio_format": "pcm16",
-
-            # ── Voice and modalities ──
-            "voice": voice,
-            "modalities": ["audio", "text"],
-
-            # ── Turn detection (VAD) — critical for conversation flow ──
-            #
-            # threshold: 0.0-1.0. Higher = needs louder speech to trigger.
-            #   0.5 = good for phone lines with background noise
-            #   0.3 = more sensitive (quiet speakers)
-            #   0.7 = less sensitive (noisy environments)
-            #
-            # prefix_padding_ms: audio before speech-start to include.
-            #   300ms captures beginning of words before VAD triggered.
-            #
-            # silence_duration_ms: silence before ending turn.
-            #   500ms = natural conversation pace
-            #   300ms = faster, more responsive
-            #   800ms = allows mid-sentence pauses
-            #
-            "turn_detection": {
-                "type": "server_vad",
-                "create_response": True,
-                "threshold": vad_threshold,
-                "prefix_padding_ms": vad_prefix_padding_ms,
-                "silence_duration_ms": vad_silence_duration_ms,
-            },
-
-            # ── Transcription (for logging/debugging) ──
-            "input_audio_transcription": {
-                "model": "gpt-4o-mini-transcribe",
-                "language": "en",
-            },
-
-            # ── Response behavior ──
-            "temperature": temperature,
-
-            # ── System instructions ──
-            "instructions": system_instructions or default_instructions,
-        },
+        "session": session_config,
     }
 
     await ws.send(json.dumps(session_update))

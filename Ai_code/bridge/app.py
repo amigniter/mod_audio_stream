@@ -1,9 +1,15 @@
 """
 OpenAI Realtime <-> FreeSWITCH bridge — playout engine.
 
-Audio path:
+Audio path (standard — OpenAI built-in voice):
   FreeSWITCH 8kHz PCM -> (soxr resample 8->24kHz) -> OpenAI Realtime API
   OpenAI 24kHz PCM -> JitterBuffer -> 1 frame/20ms tick -> JSON -> C module
+  C module Speex 24->8kHz -> inject_buffer -> WRITE_REPLACE -> caller
+
+Audio path (custom voice — YOUR voice from ww.wav):
+  FreeSWITCH 8kHz PCM -> (soxr resample 8->24kHz) -> OpenAI Realtime API
+  OpenAI TEXT response -> SentenceBuffer -> TTS Engine (your cloned voice)
+  TTS 24kHz PCM -> JitterBuffer -> 1 frame/20ms tick -> JSON -> C module
   C module Speex 24->8kHz -> inject_buffer -> WRITE_REPLACE -> caller
 
 Design (matching ChatGPT Voice quality):
@@ -12,6 +18,7 @@ Design (matching ChatGPT Voice quality):
   3. Clock starts AFTER prebuffer is satisfied — no stale-clock catch-up.
   4. Barge-in: clear JitterBuffer + send response.cancel immediately.
   5. High-quality soxr resampler for input (8->24kHz).
+  6. Custom TTS: text-only OpenAI + streaming voice synthesis.
 """
 from __future__ import annotations
 
@@ -31,6 +38,7 @@ from .config import BridgeConfig
 from .fs_payloads import FsAudioContract, fs_handshake_json, fs_stream_audio_json
 from .openai_client import build_ssl_context, connect_openai_realtime
 from .resample import Resampler, get_backend as get_resample_backend
+from .tts import TTSEngine, SentenceBuffer, TTSCache
 
 logger = logging.getLogger(__name__)
 
@@ -109,15 +117,12 @@ class JitterBuffer:
         return self._total_dequeued
 
 
-# ─────────────────────────────────────────────────────────────────
-#  InputAudioTracker
-# ─────────────────────────────────────────────────────────────────
 @dataclass
 class InputAudioTracker:
     appended_since_commit_bytes: int = 0
     commits_sent: int = 0
     commits_acked: int = 0
-    item_audio_buf: bytearray = None  # type: ignore[assignment]
+    item_audio_buf: bytearray = None  
 
     def __post_init__(self) -> None:
         if self.item_audio_buf is None:
@@ -137,9 +142,6 @@ class InputAudioTracker:
         self.commits_acked += 1
 
 
-# ─────────────────────────────────────────────────────────────────
-#  Helpers
-# ─────────────────────────────────────────────────────────────────
 def _safe_json_loads(s: str) -> Optional[dict[str, Any]]:
     try:
         return json.loads(s)
@@ -162,9 +164,6 @@ def _extract_text(evt: dict[str, Any]) -> str:
     return ""
 
 
-# ─────────────────────────────────────────────────────────────────
-#  FreeSWITCH -> OpenAI  (user microphone -> AI)
-# ─────────────────────────────────────────────────────────────────
 async def pump_freeswitch_to_openai(
     upstream_ws: websockets.WebSocketServerProtocol,
     openai_ws: websockets.WebSocketClientProtocol,
@@ -182,7 +181,6 @@ async def pump_freeswitch_to_openai(
     inbuf = bytearray()
     need_input_resample = cfg.openai_resample_input and (cfg.fs_sample_rate != openai_in_rate)
 
-    # High-quality resampler (soxr > samplerate > audioop fallback)
     input_resampler: Optional[Resampler] = None
     if need_input_resample:
         input_resampler = Resampler(cfg.fs_sample_rate, openai_in_rate, channels=1)
@@ -270,16 +268,20 @@ async def pump_freeswitch_to_openai(
                 logger.info("FreeSWITCH text: %s", str(message))
 
 
-# ─────────────────────────────────────────────────────────────────
-#  OpenAI -> FreeSWITCH  (AI voice -> caller)
-# ─────────────────────────────────────────────────────────────────
 async def pump_openai_to_freeswitch(
     openai_ws: websockets.WebSocketClientProtocol,
     upstream_ws: websockets.WebSocketServerProtocol,
     cfg: BridgeConfig,
     tracker: InputAudioTracker,
     send_lock: Optional[asyncio.Lock] = None,
+    tts_engine: Optional[TTSEngine] = None,
+    tts_cache: Optional[TTSCache] = None,
 ) -> None:
+    """Receive events from OpenAI and either:
+    - (standard) decode audio deltas into JitterBuffer
+    - (custom voice) accumulate text deltas -> SentenceBuffer -> TTS -> JitterBuffer
+    """
+    use_custom_tts = tts_engine is not None
     contract = FsAudioContract(
         sample_rate=cfg.fs_out_sample_rate,
         channels=cfg.fs_channels,
@@ -290,7 +292,6 @@ async def pump_openai_to_freeswitch(
     openai_out_channels = 1
     out_frame_bytes = frame_bytes(openai_out_rate, openai_out_channels, contract.frame_ms)
 
-    # ── Unbounded JitterBuffer (NEVER drops audio) ──
     jbuf = JitterBuffer(frame_bytes_=out_frame_bytes, frame_ms=float(contract.frame_ms))
 
     prebuffer_bytes = ceil_to_frame(
@@ -313,6 +314,93 @@ async def pump_openai_to_freeswitch(
     item_turn_in_flight = False
     last_item_turn_end_t = 0.0
     item_turn_min_interval_s = 0.25
+
+    # ── Custom TTS pipeline state ──
+    sentence_buffer: Optional[SentenceBuffer] = None
+    tts_tasks: list[asyncio.Task] = []
+    tts_voice_id = cfg.tts_voice_id or ""
+    if use_custom_tts:
+        sentence_buffer = SentenceBuffer(
+            max_chars=cfg.tts_sentence_max_chars,
+            min_chars=cfg.tts_sentence_min_chars,
+        )
+        logger.info(
+            "Custom TTS active: engine=%s voice_id=%s cache=%s",
+            tts_engine.name, tts_voice_id or "(default)",
+            "enabled" if tts_cache else "disabled",
+        )
+
+    async def _synthesize_and_enqueue(text: str) -> None:
+        """Synthesize a sentence via TTS and enqueue PCM into JitterBuffer."""
+        if not text.strip():
+            return
+
+        # Check cache first
+        if tts_cache is not None:
+            cached = await tts_cache.get(text, tts_voice_id)
+            if cached is not None:
+                jbuf.enqueue_pcm(cached.pcm16)
+                logger.debug("TTS cache hit: '%s' (%d bytes)", text[:40], len(cached.pcm16))
+                return
+
+        t0 = time.monotonic()
+        pcm_parts: list[bytes] = []
+        chunk_count = 0
+        try:
+            async for chunk in tts_engine.synthesize_stream(text, voice_id=tts_voice_id or None):
+                pcm = ensure_even_bytes(chunk.pcm16)
+                if pcm:
+                    jbuf.enqueue_pcm(pcm)
+                    pcm_parts.append(pcm)
+                    chunk_count += 1
+        except Exception:
+            logger.exception("TTS synthesis failed for '%.60s'", text)
+            return
+
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        total_bytes = sum(len(p) for p in pcm_parts)
+        logger.info(
+            "TTS: '%s' → %d chunks, %d bytes, %.0fms",
+            text[:50], chunk_count, total_bytes, elapsed_ms,
+        )
+
+        # Store in cache
+        if tts_cache is not None and total_bytes > 0:
+            full_pcm = b"".join(pcm_parts)
+            await tts_cache.put(
+                text, tts_voice_id, full_pcm,
+                sample_rate=tts_engine.output_sample_rate,
+                channels=tts_engine.output_channels,
+                synthesis_ms=elapsed_ms,
+            )
+
+    def _schedule_tts(text: str) -> None:
+        """Schedule TTS synthesis as a background task."""
+        task = asyncio.create_task(_synthesize_and_enqueue(text))
+        tts_tasks.append(task)
+        # Clean up completed tasks
+        tts_tasks[:] = [t for t in tts_tasks if not t.done()]
+
+    async def _flush_sentence_buffer() -> None:
+        """Flush remaining text in sentence buffer to TTS."""
+        if sentence_buffer is not None:
+            remaining = sentence_buffer.flush()
+            if remaining:
+                _schedule_tts(remaining)
+
+    async def _cancel_tts_tasks() -> None:
+        """Cancel all in-flight TTS synthesis (barge-in)."""
+        for t in tts_tasks:
+            if not t.done():
+                t.cancel()
+        for t in tts_tasks:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+        tts_tasks.clear()
+        if sentence_buffer is not None:
+            sentence_buffer.flush()  # discard pending text
 
     async def _send_item_audio_and_respond(reason: str) -> None:
         nonlocal response_in_flight, item_turn_in_flight, last_item_turn_end_t
@@ -373,9 +461,10 @@ async def pump_openai_to_freeswitch(
         _mark_response_created()
         response_in_flight = True
         try:
+            resp_modalities = ["text"] if use_custom_tts else ["audio", "text"]
             pkt2 = json.dumps({
                 "type": "response.create",
-                "response": {"modalities": ["audio", "text"]},
+                "response": {"modalities": resp_modalities},
             })
             if send_lock is not None:
                 async with send_lock:
@@ -395,13 +484,6 @@ async def pump_openai_to_freeswitch(
         nonlocal last_response_create_t
         last_response_create_t = time.monotonic()
 
-    # ─────────────────────────────────────────────────────────────
-    #  Playout loop — the heartbeat
-    #
-    #  Exactly 1 frame per 20ms tick. No multi-drain. No bursts.
-    #  JitterBuffer is unbounded so audio is NEVER dropped.
-    #  Silence frames fill underruns for smooth audio.
-    # ─────────────────────────────────────────────────────────────
     async def _playout_loop() -> None:
         step_s = contract.frame_ms / 1000.0  # 0.020
 
@@ -411,16 +493,10 @@ async def pump_openai_to_freeswitch(
         last_stats_sent = 0
         last_stats_underruns = 0
 
-        # Pre-generate a silence frame for underrun fill
-        # This prevents gaps/pops when buffer momentarily empties
         silence_frame = b"\x00" * out_frame_bytes
 
-        # Prebuffer timeout — never wait more than 5s for first audio.
-        # If OpenAI is slow to respond, start playout anyway (silence fill
-        # handles the gap gracefully instead of hanging forever).
         PREBUFFER_TIMEOUT_S = 5.0
 
-        # Wait for first audio before starting clock
         prebuffer_start = time.monotonic()
         if prebuffer_bytes > 0:
             while jbuf.buffered_bytes < prebuffer_bytes:
@@ -438,7 +514,6 @@ async def pump_openai_to_freeswitch(
                     break
                 await asyncio.sleep(0.005)
 
-        # Clock starts NOW
         next_t = time.monotonic() + step_s
 
         try:
@@ -450,13 +525,11 @@ async def pump_openai_to_freeswitch(
 
                 now = time.monotonic()
 
-                # Fell behind >2 ticks? Reset, don't burst
                 if now - next_t > step_s * 2:
                     next_t = now
 
                 next_t += step_s
 
-                # ── Exactly ONE frame per tick ──
                 frame = jbuf.dequeue()
                 if frame is not None:
                     if cfg.fs_send_json_audio:
@@ -470,8 +543,6 @@ async def pump_openai_to_freeswitch(
                     await upstream_ws.send(payload)
                     frames_sent += 1
                 else:
-                    # Underrun: send silence frame to prevent audio gaps/pops.
-                    # The caller hears smooth silence instead of choppy artifacts.
                     underruns += 1
                     if cfg.fs_send_json_audio:
                         payload = fs_stream_audio_json(
@@ -483,7 +554,6 @@ async def pump_openai_to_freeswitch(
                         payload = silence_frame
                     await upstream_ws.send(payload)
 
-                # Stats every 5s
                 now_s = time.monotonic()
                 if now_s - last_stats_t >= 5.0:
                     dt = now_s - last_stats_t
@@ -517,7 +587,6 @@ async def pump_openai_to_freeswitch(
 
             evt_type = evt.get("type")
 
-            # ── User transcription ──
             if evt_type in (
                 "input_audio_transcription.delta",
                 "input_audio_transcription",
@@ -532,7 +601,6 @@ async def pump_openai_to_freeswitch(
                         user_text_buf.clear()
                 continue
 
-            # ── AI text transcript ──
             if evt_type in (
                 "response.text.delta",
                 "response.output_text.delta",
@@ -544,21 +612,33 @@ async def pump_openai_to_freeswitch(
                 t = _extract_text(evt)
                 if t:
                     if evt_type.endswith(".done"):
-                        # .done = complete transcript — replace
                         ai_text_buf.clear()
                         ai_text_buf.append(t)
                         logger.info("AI_TEXT: %s", t.strip())
                     else:
                         ai_text_buf.append(t)
+
+                    # ── Custom TTS: feed text tokens into SentenceBuffer ──
+                    if use_custom_tts and sentence_buffer is not None:
+                        # Only process delta events (streaming tokens), not done/completed
+                        is_delta = "delta" in evt_type
+                        if is_delta:
+                            sentences = sentence_buffer.push(t)
+                            for sentence in sentences:
+                                logger.debug("TTS sentence: '%s'", sentence[:60])
+                                _schedule_tts(sentence)
                 continue
 
-            # ── Response complete ──
             if evt_type in ("response.completed", "response.done"):
-                # Don't log AI_TEXT again — .done already logged it
                 ai_text_buf.clear()
                 user_text_buf.clear()
                 response_in_flight = False
                 item_turn_in_flight = False
+
+                # Flush any remaining text in sentence buffer to TTS
+                if use_custom_tts:
+                    await _flush_sentence_buffer()
+
                 logger.info(
                     "Response done: chunks=%d bytes=%d buf_ms=%.0f",
                     audio_chunks_received, audio_bytes_received,
@@ -568,7 +648,6 @@ async def pump_openai_to_freeswitch(
                 audio_bytes_received = 0
                 continue
 
-            # ── Audio delta — enqueue into JitterBuffer ──
             if evt_type in (
                 "response.audio.delta",
                 "response.output_audio.delta",
@@ -597,7 +676,6 @@ async def pump_openai_to_freeswitch(
                 if audio_chunks_received == 1:
                     logger.info("First audio chunk: bytes=%d", len(pcm))
 
-                # Mono downmix if stereo
                 src_ch = 1
                 if isinstance(evt.get("channels"), int):
                     src_ch = int(evt["channels"])
@@ -618,7 +696,6 @@ async def pump_openai_to_freeswitch(
                 jbuf.enqueue_pcm(pcm)
                 continue
 
-            # ── Speech stopped (turn end) ──
             if evt_type in (
                 "input_audio_buffer.speech_stopped",
                 "input_audio_buffer.speech_end",
@@ -632,7 +709,6 @@ async def pump_openai_to_freeswitch(
                     tracker.on_committed()
                 continue
 
-            # ── Speech started (barge-in) ──
             if evt_type in (
                 "input_audio_buffer.speech_started",
                 "input_audio_buffer.speech_start",
@@ -644,9 +720,11 @@ async def pump_openai_to_freeswitch(
                     cleared_ms = (cleared / out_frame_bytes) * contract.frame_ms if out_frame_bytes > 0 else 0
                     logger.info("Barge-in: cleared %d bytes (%.0f ms) from jitter buffer", cleared, cleared_ms)
 
-                # Also tell the C module to flush its inject_buffer.
-                # Send a "clear" command as a JSON text frame so the
-                # caller immediately stops hearing stale AI audio.
+                # Cancel in-flight TTS synthesis on barge-in
+                if use_custom_tts:
+                    await _cancel_tts_tasks()
+                    logger.debug("Barge-in: cancelled TTS tasks")
+
                 try:
                     clear_cmd = json.dumps({
                         "type": "streamAudio",
@@ -663,7 +741,6 @@ async def pump_openai_to_freeswitch(
                 except Exception:
                     logger.debug("Failed to send clear command to C module")
 
-                # Cancel in-flight response
                 if response_in_flight:
                     try:
                         cancel_pkt = json.dumps({"type": "response.cancel"})
@@ -678,23 +755,19 @@ async def pump_openai_to_freeswitch(
                         logger.debug("Failed to send response.cancel")
                 continue
 
-            # ── Buffer committed ──
             if evt_type == "input_audio_buffer.committed":
                 tracker.on_commit_acked()
                 tracker.on_committed()
                 continue
 
-            # ── Errors ──
             if evt_type == "error":
                 logger.error("OpenAI error: %s", json.dumps(evt, ensure_ascii=False))
                 continue
 
-            # ── Session events ──
             if evt_type in ("session.created", "session.updated"):
                 logger.info("OpenAI: %s", evt_type)
                 continue
 
-            # ── Known noisy events — ignore silently ──
             if evt_type in (
                 "rate_limits.updated",
                 "response.created",
@@ -708,7 +781,6 @@ async def pump_openai_to_freeswitch(
             ):
                 continue
 
-            # Truly unknown
             if evt_type:
                 logger.debug("OpenAI unhandled: %s", evt_type)
 
@@ -718,14 +790,23 @@ async def pump_openai_to_freeswitch(
             await playout_task
         except asyncio.CancelledError:
             pass
+        # Clean up TTS tasks
+        if use_custom_tts:
+            await _cancel_tts_tasks()
 
 
-# ─────────────────────────────────────────────────────────────────
-#  Call handler + server
-# ─────────────────────────────────────────────────────────────────
-async def handle_call(cfg: BridgeConfig, upstream_ws: websockets.WebSocketServerProtocol) -> None:
+async def handle_call(
+    cfg: BridgeConfig,
+    upstream_ws: websockets.WebSocketServerProtocol,
+    tts_engine: Optional[TTSEngine] = None,
+    tts_cache: Optional[TTSCache] = None,
+) -> None:
     peer = getattr(upstream_ws, "remote_address", None)
     logger.info("Call connected: %s", peer)
+
+    use_custom_tts = tts_engine is not None
+    if use_custom_tts:
+        logger.info("Custom voice mode: TTS=%s (OpenAI text-only)", tts_engine.name)
 
     ssl_ctx = build_ssl_context(cfg.wss_pem, cfg.openai_wss_insecure)
     openai_ws = await connect_openai_realtime(
@@ -738,6 +819,7 @@ async def handle_call(cfg: BridgeConfig, upstream_ws: websockets.WebSocketServer
         vad_silence_duration_ms=cfg.vad_silence_duration_ms,
         temperature=cfg.temperature,
         system_instructions=cfg.system_instructions,
+        text_only_mode=use_custom_tts,
     )
 
     if cfg.fs_send_json_audio and cfg.fs_send_json_handshake:
@@ -753,7 +835,12 @@ async def handle_call(cfg: BridgeConfig, upstream_ws: websockets.WebSocketServer
         pump_freeswitch_to_openai(upstream_ws, openai_ws, cfg, tracker, send_lock=send_lock)
     )
     to_fs = asyncio.create_task(
-        pump_openai_to_freeswitch(openai_ws, upstream_ws, cfg, tracker, send_lock=send_lock)
+        pump_openai_to_freeswitch(
+            openai_ws, upstream_ws, cfg, tracker,
+            send_lock=send_lock,
+            tts_engine=tts_engine,
+            tts_cache=tts_cache,
+        )
     )
 
     done, pending = await asyncio.wait({to_openai, to_fs}, return_when=asyncio.FIRST_EXCEPTION)
@@ -782,28 +869,41 @@ async def handle_call(cfg: BridgeConfig, upstream_ws: websockets.WebSocketServer
         pass
 
 
-async def run_server(cfg: BridgeConfig) -> None:
+async def run_server(
+    cfg: BridgeConfig,
+    tts_engine: Optional[TTSEngine] = None,
+    tts_cache: Optional[TTSCache] = None,
+) -> None:
     async def _handler(ws: websockets.WebSocketServerProtocol):
         try:
-            await handle_call(cfg, ws)
+            await handle_call(cfg, ws, tts_engine=tts_engine, tts_cache=tts_cache)
         except websockets.ConnectionClosed:
             pass
         except Exception:
             logger.exception("Bridge error")
 
     logger.info("Listening on ws://%s:%d", cfg.host, cfg.port)
+    if tts_engine is not None:
+        logger.info("Custom voice active: %s", tts_engine.name)
     stop_event = asyncio.Event()
 
-    # Graceful shutdown on SIGINT/SIGTERM
     import signal
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, stop_event.set)
         except (NotImplementedError, OSError):
-            pass  # Windows doesn't support add_signal_handler
+            pass  
 
     async with websockets.serve(_handler, cfg.host, cfg.port, max_size=16 * 1024 * 1024):
         logger.info("Server ready — press Ctrl+C to stop")
         await stop_event.wait()
         logger.info("Shutting down gracefully...")
+
+    # Clean up TTS engine
+    if tts_engine is not None:
+        try:
+            await tts_engine.close()
+            logger.info("TTS engine closed")
+        except Exception:
+            logger.warning("TTS engine close failed", exc_info=True)
