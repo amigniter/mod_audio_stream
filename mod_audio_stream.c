@@ -47,13 +47,20 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
 
             int channel_closing = 1;
 
-            stream_session_cleanup(session, NULL, channel_closing);
+            if (tech_pvt->ai_cfg.ai_mode_enabled) {
+                ai_engine_session_cleanup(session, channel_closing);
+            } else {
+                stream_session_cleanup(session, NULL, channel_closing);
+            }
         }
         break;
 
     case SWITCH_ABC_TYPE_READ:
         if (tech_pvt->close_requested) {
             return SWITCH_FALSE;
+        }
+        if (tech_pvt->ai_cfg.ai_mode_enabled) {
+            return ai_engine_feed_frame(bug);
         }
         return stream_frame(bug);
 
@@ -63,6 +70,19 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
                 switch_core_media_bug_get_write_replace_frame(bug);
 
             if (!frame || !frame->data || frame->datalen == 0 || !tech_pvt) {
+                break;
+            }
+
+            if (tech_pvt->ai_cfg.ai_mode_enabled) {
+                switch_size_t filled = ai_engine_read_audio(
+                    tech_pvt,
+                    (int16_t *)frame->data,
+                    frame->datalen / 2
+                );
+                if (filled == 0) {
+                    memset(frame->data, 0, frame->datalen);
+                }
+                switch_core_media_bug_set_write_replace_frame(bug, frame);
                 break;
             }
 
@@ -108,59 +128,34 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
                 got = switch_buffer_read(tech_pvt->inject_buffer, inj, to_read);
             }
 
-            /* Update stats under mutex to avoid data races */
             if (got < need) {
                 tech_pvt->inject_underruns++;
             }
             tech_pvt->inject_write_calls++;
             tech_pvt->inject_bytes += got;
 
-            /* Capture inject_buffer inuse while we still hold mutex */
             const unsigned long inject_inuse_now = tech_pvt->inject_buffer ?
                 (unsigned long)switch_buffer_inuse(tech_pvt->inject_buffer) : 0;
 
             switch_mutex_unlock(tech_pvt->mutex);
 
             if (got > 0) {
-                /*
-                 * CRITICAL for voice quality: only inject audio when we have
-                 * a FULL frame.  Partial reads + silence padding create
-                 * audible clicks at the audio/silence boundary within the
-                 * frame.  When we don't have enough data, leave the original
-                 * frame untouched (caller hears silence from the RTP stream,
-                 * which is continuous and click-free).
-                 *
-                 * If we got a partial read, push the bytes BACK into the
-                 * buffer so they aren't lost — they'll be consumed next time
-                 * when combined with newly-arriving data.
-                 */
                 if (got >= need) {
                     memcpy(frame->data, inj, need);
                 } else {
-                    /* Put partial data back — don't waste it */
+                   
                     switch_mutex_lock(tech_pvt->mutex);
                     if (tech_pvt->inject_buffer) {
-                        /*
-                         * We need to prepend to the buffer.  FreeSWITCH's
-                         * switch_buffer doesn't support prepend, so we read
-                         * the remaining data, write partial+remaining back.
-                         * For the common case (small partial near underrun),
-                         * remaining is small or zero, so this is cheap.
-                         */
                         switch_size_t remaining = switch_buffer_inuse(tech_pvt->inject_buffer);
                         if (remaining == 0) {
-                            /* Simple case: buffer is empty, just write back */
                             switch_buffer_write(tech_pvt->inject_buffer, inj, got);
                         } else if (remaining + got <= tech_pvt->read_scratch_len) {
-                            /* Read remaining into scratch, zero buffer, write partial+remaining */
                             uint8_t *tmp = tech_pvt->read_scratch;
                             switch_buffer_read(tech_pvt->inject_buffer, tmp, remaining);
                             switch_buffer_zero(tech_pvt->inject_buffer);
                             switch_buffer_write(tech_pvt->inject_buffer, inj, got);
                             switch_buffer_write(tech_pvt->inject_buffer, tmp, remaining);
                         } else {
-                            /* Remaining too large for scratch — just lose the partial (rare) */
-                            /* This shouldn't happen in practice since read_scratch is large */
                         }
                     }
                     switch_mutex_unlock(tech_pvt->mutex);
@@ -173,7 +168,6 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
                 const switch_time_t now = switch_micro_time_now();
                 if (!tech_pvt->inject_last_report) tech_pvt->inject_last_report = now;
 
-                /* Use configurable log interval (default 1000ms) */
                 const switch_time_t log_interval_us =
                     (tech_pvt->cfg.inject_log_every_ms > 0 ? tech_pvt->cfg.inject_log_every_ms : 1000) * 1000LL;
 
@@ -278,7 +272,6 @@ static switch_status_t start_capture(switch_core_session_t *session,
             flags,
             &bug
         ) != SWITCH_STATUS_SUCCESS) {
-        /* Clean up the AudioStreamer that stream_session_init created */
         stream_session_cleanup(session, NULL, 0);
         return SWITCH_STATUS_FALSE;
     }
@@ -289,6 +282,16 @@ static switch_status_t start_capture(switch_core_session_t *session,
 
 static switch_status_t do_stop(switch_core_session_t *session, char* text)
 {
+    switch_channel_t *channel = switch_core_session_get_channel(session);
+    switch_media_bug_t *bug = (switch_media_bug_t *)switch_channel_get_private(channel, MY_BUG_NAME);
+
+    if (bug) {
+        private_t *tech_pvt = (private_t *)switch_core_media_bug_get_user_data(bug);
+        if (tech_pvt && tech_pvt->ai_cfg.ai_mode_enabled) {
+            ai_engine_session_cleanup(session, 0);
+            return SWITCH_STATUS_SUCCESS;
+        }
+    }
     return stream_session_cleanup(session, text, 0);
 }
 
@@ -302,8 +305,83 @@ static switch_status_t send_text(switch_core_session_t *session, char* text)
     return stream_session_send_text(session, text);
 }
 
+static switch_status_t start_capture_ai(switch_core_session_t *session)
+{
+    switch_channel_t *channel = switch_core_session_get_channel(session);
+    switch_media_bug_t *bug;
+    switch_codec_t *read_codec;
+    private_t *tech_pvt = NULL;
+
+    if (switch_channel_get_private(channel, MY_BUG_NAME)) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                          "start_capture_ai: bug already running\n");
+        return SWITCH_STATUS_FALSE;
+    }
+
+    if (switch_channel_pre_answer(channel) != SWITCH_STATUS_SUCCESS) {
+        return SWITCH_STATUS_FALSE;
+    }
+
+    read_codec = switch_core_session_get_read_codec(session);
+    if (!read_codec || !read_codec->implementation) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                          "start_capture_ai: no read codec\n");
+        return SWITCH_STATUS_FALSE;
+    }
+
+    tech_pvt = (private_t *)switch_core_session_alloc(session, sizeof(private_t));
+    memset(tech_pvt, 0, sizeof(private_t));
+
+    switch_mutex_init(&tech_pvt->mutex, SWITCH_MUTEX_NESTED,
+                      switch_core_session_get_pool(session));
+
+    tech_pvt->channels = 1;
+    tech_pvt->ai_cfg.ai_mode_enabled = 1;
+
+    int ai_sampling = read_codec->implementation->actual_samples_per_second;
+    void *pUserData = tech_pvt;
+
+    if (ai_engine_session_init(session, responseHandler,
+                               ai_sampling, ai_sampling, 1,
+                               &pUserData) != SWITCH_STATUS_SUCCESS) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                          "start_capture_ai: ai_engine_session_init failed\n");
+        return SWITCH_STATUS_FALSE;
+    }
+
+    switch_media_bug_flag_t flags = SMBF_READ_STREAM | SMBF_WRITE_REPLACE;
+
+    if (switch_core_media_bug_add(
+            session,
+            MY_BUG_NAME,
+            NULL,
+            capture_callback,
+            tech_pvt,
+            0,
+            flags,
+            &bug
+        ) != SWITCH_STATUS_SUCCESS) {
+        ai_engine_session_cleanup(session, 0);
+        return SWITCH_STATUS_FALSE;
+    }
+
+    switch_channel_set_private(channel, MY_BUG_NAME, bug);
+
+    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                      "(%s) AI voice agent started, rate=%d\n",
+                      switch_core_session_get_uuid(session),
+                      read_codec->implementation->actual_samples_per_second);
+
+    return SWITCH_STATUS_SUCCESS;
+}
+
 #define STREAM_API_SYNTAX \
-"<uuid> start <ws-uri> [mono|mixed|stereo] [8000|16000|24000|32000|48000] [metadata]"
+"<uuid> start <ws-uri> [mono|mixed|stereo] [8000|16000|24000|32000|48000] [metadata] | " \
+"<uuid> start_ai | " \
+"<uuid> stop [text] | " \
+"<uuid> pause | " \
+"<uuid> resume | " \
+"<uuid> send_text <text>"
 
 SWITCH_STANDARD_API(stream_function)
 {
@@ -357,7 +435,6 @@ SWITCH_STANDARD_API(stream_function)
 #ifdef SMBF_OPT_MIXED_READ
                 flags |= SMBF_OPT_MIXED_READ;
 #else
-                /* Some FreeSWITCH builds don't expose SMBF_OPT_MIXED_READ; fall back to normal read stream. */
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(lsession), SWITCH_LOG_WARNING,
                                   "(%s) 'mixed' requested but SMBF_OPT_MIXED_READ not available; falling back to mono.\n",
                                   switch_core_session_get_uuid(lsession));
@@ -387,6 +464,9 @@ SWITCH_STANDARD_API(stream_function)
             argc > 5 ? argv[5] : NULL
         );
     }
+    else if (!strcasecmp(argv[1], "start_ai")) {
+        status = start_capture_ai(lsession);
+    }
 
     switch_core_session_rwunlock(lsession);
 
@@ -413,6 +493,9 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
     switch_event_reserve_subclass(EVENT_ERROR);
     switch_event_reserve_subclass(EVENT_DISCONNECT);
     switch_event_reserve_subclass(EVENT_PLAY);
+    switch_event_reserve_subclass(EVENT_AI_STATE);
+    switch_event_reserve_subclass(EVENT_AI_TRANSCRIPT);
+    switch_event_reserve_subclass(EVENT_AI_RESPONSE);
 
     SWITCH_ADD_API(
         api_interface,
@@ -432,5 +515,8 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_audio_stream_shutdown)
     switch_event_free_subclass(EVENT_DISCONNECT);
     switch_event_free_subclass(EVENT_ERROR);
     switch_event_free_subclass(EVENT_PLAY);
+    switch_event_free_subclass(EVENT_AI_STATE);
+    switch_event_free_subclass(EVENT_AI_TRANSCRIPT);
+    switch_event_free_subclass(EVENT_AI_RESPONSE);
     return SWITCH_STATUS_SUCCESS;
 }

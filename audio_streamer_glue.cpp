@@ -486,7 +486,6 @@ private:
         const char* jsAudioDataType = cJSON_GetObjectCstr(jsonData, "audioDataType");
         if (!jsAudioDataType) jsAudioDataType = "";
 
-        /* ── Barge-in clear command: flush inject_buffer immediately ── */
         cJSON* jsonClear = cJSON_GetObjectItem(jsonData, "clear");
         if (jsonClear && cJSON_IsTrue(jsonClear)) {
             switch_media_bug_t* bug = get_media_bug(psession);
@@ -686,7 +685,7 @@ private:
         }
 
         const int out_sr = tech_pvt->sampling > 0 ? tech_pvt->sampling : tech_pvt->inject_sample_rate;
-        const int original_sample_rate = sampleRate;  /* preserve for logging before resample overwrites */
+        const int original_sample_rate = sampleRate;  
         if (out_sr <= 0) {
             push_err(out, m_sessionId, "processMessage - invalid output sample rate (session) for injection");
             return out;
@@ -870,7 +869,6 @@ namespace {
               "(%s) mod_audio_stream build version %s running\n",
               _uuid_log, MOD_AUDIO_STREAM_VERSION);
 
-          /* Save cfg before zeroing — it was set by the caller */
           const private_data_config_t saved_cfg = tech_pvt->cfg;
           memset(tech_pvt, 0, sizeof(private_t));
           tech_pvt->cfg = saved_cfg;
@@ -926,9 +924,6 @@ namespace {
         }
 
         {
-            /* Allocate inject_scratch large enough for any frame size the
-             * codec might request.  SWITCH_RECOMMENDED_BUFFER_SIZE is safe;
-             * FRAME_SIZE_8000 is too small for wideband/ultra-wideband. */
             const size_t init_inject_scratch = SWITCH_RECOMMENDED_BUFFER_SIZE;
             tech_pvt->inject_scratch = (uint8_t*) switch_core_session_alloc(session, init_inject_scratch);
             tech_pvt->inject_scratch_len = init_inject_scratch;
@@ -1035,7 +1030,6 @@ extern "C" {
             }
         }
 
-        /* Validate path: reject directory traversal in path/query */
         const char* pathStart = std::strchr(hostEnd, '/');
         if (pathStart) {
             if (std::strstr(pathStart, "..") != nullptr) {

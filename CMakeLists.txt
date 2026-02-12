@@ -6,7 +6,7 @@ project(mod_audio_stream
 
 include(GNUInstallDirs)
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_SHARED_LIBRARY_PREFIX "")
 set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -g")
 
@@ -18,6 +18,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 find_package(PkgConfig REQUIRED)
 find_package(SpeexDSP REQUIRED)
+find_package(CURL REQUIRED)
 
 # FreeSWITCH discovery
 # Prefer pkg-config (normal installs). If you only have a FreeSWITCH source tree
@@ -99,6 +100,13 @@ add_library(mod_audio_stream SHARED
     audio_streamer_glue.h
     audio_streamer_glue.cpp
     base64.cpp
+    ai_engine_glue.cpp
+    ai_engine/dsp_pipeline.cpp
+    ai_engine/sentence_buffer.cpp
+    ai_engine/tts_elevenlabs.cpp
+    ai_engine/tts_cache.cpp
+    ai_engine/openai_realtime.cpp
+    ai_engine/ai_engine.cpp
 )
 
 set_property(TARGET mod_audio_stream PROPERTY POSITION_INDEPENDENT_CODE ON)
@@ -107,9 +115,19 @@ target_link_libraries(mod_audio_stream PRIVATE
     pthread
     libwsc
     ${SPEEXDSP_LIBRARIES}
+    CURL::libcurl
 )
 
-target_include_directories(mod_audio_stream PRIVATE ${SPEEXDSP_INCLUDE_DIRS})
+# Define HAVE_SWITCH_H so ai_engine/*.cpp uses switch_log_printf
+# instead of fprintf(stderr, ...).
+target_compile_definitions(mod_audio_stream PRIVATE HAVE_SWITCH_H)
+
+target_include_directories(mod_audio_stream PRIVATE
+    ${SPEEXDSP_INCLUDE_DIRS}
+    ${CURL_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/ai_engine
+)
 
 if(FreeSWITCH_FOUND)
     target_link_libraries(mod_audio_stream PRIVATE PkgConfig::FreeSWITCH)
@@ -135,7 +153,7 @@ if(CMAKE_BUILD_TYPE MATCHES "Release")
 endif()
 
 set(CPACK_COMPONENTS_ALL ${PROJECT_NAME} changelog.gz copyright)
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, libspeexdsp1, openssl, zlib1g, libfreeswitch1")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, libspeexdsp1, openssl, zlib1g, libfreeswitch1, libcurl4")
 set(CPACK_PACKAGE_NAME "mod-audio-stream")
 set(CMAKE_INSTALL_DOCDIR "share/doc/${CPACK_PACKAGE_NAME}")
 

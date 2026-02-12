@@ -134,14 +134,12 @@ The entire round-trip takes **300–500ms** from end-of-speech to first AI audio
 ### 1. Build & Install the C Module
 
 ```bash
-# Install dependencies (Debian/Ubuntu)
+
 sudo apt-get install -y libfreeswitch-dev libssl-dev zlib1g-dev libspeexdsp-dev cmake
 
-# Clone
 git clone https://github.com/Rahulcse79/mod_audio_stream.git
 cd mod_audio_stream
 
-# Build
 git submodule init && git submodule update
 mkdir -p build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
@@ -162,14 +160,9 @@ cd Ai_code
 python -m venv .venv
 source .venv/bin/activate
 
-# Install with high-quality resampler
 pip install -e ".[hq]"
 
-# Configure
 cp .env.example .env
-# Edit .env — set OPENAI_API_KEY at minimum
-
-# Run
 python main.py
 ```
 
@@ -178,7 +171,6 @@ python main.py
 In your FreeSWITCH dialplan or via `fs_cli`:
 
 ```xml
-<!-- Dialplan example: route 1234 to AI IVR -->
 <extension name="ai_ivr">
   <condition field="destination_number" expression="^1234$">
     <action application="answer"/>
@@ -205,7 +197,7 @@ uuid_audio_stream <call-uuid> start ws://127.0.0.1:8765 mono 8000
 ```bash
 cmake -DCMAKE_BUILD_TYPE=Release \
       -DENABLE_LOCAL=ON \                          # Use /usr/local/freeswitch
-      -DFREESWITCH_SRC_ROOT=/path/to/freeswitch \  # Or point to source
+      -DFREESWITCH_SRC_ROOT=/path/to/freeswitch \ 
       ..
 ```
 
@@ -234,9 +226,9 @@ sudo dpkg -i mod-audio-stream_*.deb
 
 ```bash
 cd Ai_code
-pip install -e .         # Basic (audioop resampler fallback)
-pip install -e ".[hq]"   # High-quality (soxr resampler — recommended)
-pip install -e ".[alt]"  # Alternative (libsamplerate resampler)
+pip install -e .         
+pip install -e ".[hq]"   
+pip install -e ".[alt]"  
 ```
 
 ### Configuration (`.env`)
@@ -244,40 +236,23 @@ pip install -e ".[alt]"  # Alternative (libsamplerate resampler)
 Create `Ai_code/.env`:
 
 ```bash
-# ── Required ──
 OPENAI_API_KEY=sk-...
-
-# ── Server ──
 HOST=0.0.0.0
 PORT=8765
-
-# ── Audio Format ──
-FS_SAMPLE_RATE=8000           # FreeSWITCH codec rate
-FS_CHANNELS=1                 # Mono
-FS_FRAME_MS=20                # Frame duration
-FS_OUT_SAMPLE_RATE=24000      # What we send back to C module
-
-# ── OpenAI ──
+FS_SAMPLE_RATE=8000          
+FS_CHANNELS=1                
+FS_FRAME_MS=20               
+FS_OUT_SAMPLE_RATE=24000      
 OPENAI_REALTIME_MODEL=gpt-4o-realtime-preview
-OPENAI_REALTIME_VOICE=alloy   # OpenAI voice (when not using custom TTS)
+OPENAI_REALTIME_VOICE=alloy   
 OPENAI_TEMPERATURE=0.6
-OPENAI_RESAMPLE_INPUT=1       # Resample 8k→24k before sending to OpenAI
-
-# ── VAD (Voice Activity Detection) ──
-VAD_THRESHOLD=0.5             # 0.0-1.0, higher = less sensitive
-VAD_SILENCE_DURATION_MS=300   # Silence before ending turn
-VAD_PREFIX_PADDING_MS=300     # Audio before speech-start to include
-
-# ── Playout ──
-PLAYOUT_PREBUFFER_MS=100      # Buffer before starting playback
-
-# ── Protocol ──
-FS_SEND_JSON_AUDIO=1          # Send JSON frames (required for injection)
-FS_SEND_JSON_HANDSHAKE=1      # Optional handshake frame
-
-# ── TLS ──
-# WSS_PEM=./wss.pem           # Custom CA bundle (macOS)
-# OPENAI_WSS_INSECURE=0       # Disable TLS verification (debug only)
+OPENAI_RESAMPLE_INPUT=1       
+VAD_THRESHOLD=0.5             
+VAD_SILENCE_DURATION_MS=300   
+VAD_PREFIX_PADDING_MS=300
+PLAYOUT_PREBUFFER_MS=100      
+FS_SEND_JSON_AUDIO=1          
+FS_SEND_JSON_HANDSHAKE=1
 ```
 
 ---
@@ -362,26 +337,17 @@ Replace OpenAI's built-in voice with your own cloned/custom voice.
 Add to your `.env`:
 
 ```bash
-# ── Custom TTS ──
-TTS_PROVIDER=elevenlabs        # elevenlabs | cartesia | selfhosted | openai | none
+
+TTS_PROVIDER=elevenlabs         
 TTS_API_KEY=your-elevenlabs-key
 TTS_VOICE_ID=your-cloned-voice-id
-TTS_MODEL=eleven_turbo_v2_5    # Provider-specific model
-
-# ── Failover ──
-TTS_FALLBACK_PROVIDER=openai   # Fallback if primary fails
-
-# ── Sentence Buffering ──
-TTS_SENTENCE_MAX_CHARS=80      # Flush text at ~sentence boundaries
-TTS_SENTENCE_MIN_CHARS=10      # Don't send tiny fragments to TTS
-
-# ── Caching (0ms latency for common phrases) ──
+TTS_MODEL=eleven_turbo_v2_5
+TTS_FALLBACK_PROVIDER=openai   
+TTS_SENTENCE_MAX_CHARS=80      
+TTS_SENTENCE_MIN_CHARS=10      
 TTS_CACHE_ENABLED=1
 TTS_CACHE_MAX_ENTRIES=500
 TTS_CACHE_TTL_S=3600
-
-# ── Self-hosted ──
-# TTS_SELFHOSTED_URL=http://tts-gpu-service:8080
 ```
 
 ### TTS Architecture
@@ -429,8 +395,8 @@ See [`Ai_code/ARCHITECTURE_CUSTOM_VOICE.md`](Ai_code/ARCHITECTURE_CUSTOM_VOICE.m
 The bridge includes a built-in health server for Kubernetes probes:
 
 ```bash
-HEALTH_PORT=8766              # Health check HTTP port
-MAX_CONCURRENT_CALLS=100      # Readiness threshold
+HEALTH_PORT=8766              
+MAX_CONCURRENT_CALLS=100      
 ```
 
 Endpoints:
@@ -586,9 +552,8 @@ Barge-in clear command:
 ### OpenAI TLS failure (macOS)
 
 ```bash
-WSS_PEM=./wss.pem   # Use bundled CA bundle
-# OR
-pip install certifi  # Auto-detected by the bridge
+WSS_PEM=./wss.pem   
+pip install certifi 
 ```
 
 ### High latency

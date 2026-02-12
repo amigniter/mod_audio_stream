@@ -4,7 +4,6 @@ cmake-build-debug/
 build/
 _packages
 
-# Python bridge
 Ai_code/.env
 Ai_code/.venv/
 Ai_code/__pycache__/
