@@ -50,7 +50,6 @@ public:
         , mask_(capacity_ - 1)
     {
 #if defined(_MSC_VER)
-#if defined(_MSC_VER)
         buffer_ = static_cast<uint8_t*>(_aligned_malloc(capacity_, kCacheLineSize));
 #else
         {
@@ -145,7 +144,6 @@ public:
     size_t write_all(const uint8_t* data, size_t len) {
         if (!buffer_ || !data || len == 0) return 0;
 
-
         if (len > capacity_) {
             data += (len - capacity_);
             len = capacity_;
@@ -153,21 +151,24 @@ public:
 
         const size_t h = head_.load(std::memory_order_relaxed);
         const size_t t = tail_.load(std::memory_order_acquire);
-        const size_t avail = capacity_ - (h - t);
+        const size_t used = h - t;
+        const size_t avail = capacity_ - used;
 
-
-        size_t to_write = std::min(len, avail);
-        if (to_write == 0) return 0;
-
-        const size_t pos = h & mask_;
-        const size_t first = std::min(to_write, capacity_ - pos);
-        std::memcpy(buffer_ + pos, data, first);
-        if (first < to_write) {
-            std::memcpy(buffer_, data + first, to_write - first);
+      
+        if (len > avail) {
+            size_t discard = len - avail;
+            tail_.store(t + discard, std::memory_order_release);
         }
 
-        head_.store(h + to_write, std::memory_order_release);
-        return to_write;
+        const size_t pos = h & mask_;
+        const size_t first = std::min(len, capacity_ - pos);
+        std::memcpy(buffer_ + pos, data, first);
+        if (first < len) {
+            std::memcpy(buffer_, data + first, len - first);
+        }
+
+        head_.store(h + len, std::memory_order_release);
+        return len;
     }
 
 

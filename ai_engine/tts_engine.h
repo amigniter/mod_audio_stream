@@ -98,7 +98,7 @@ private:
         std::string         sentence;
         int                 sample_rate;
         bool                had_error;
-        int                 http_status;/
+        int                 http_status;
         std::vector<uint8_t> pcm_buffer;
         size_t               pcm_buffer_pos;
         bool                 header_parsed;
@@ -140,10 +140,13 @@ private:
         std::string         sentence;
         int                 sample_rate;
         bool                had_error;
+        int                 http_status;
         std::vector<uint8_t> pcm_buffer;
+        size_t               pcm_buffer_pos;
     };
 
     static size_t curl_write_callback(char* ptr, size_t size, size_t nmemb, void* userdata);
+    static size_t curl_header_callback(char* buffer, size_t size, size_t nitems, void* userdata);
     static int    curl_progress_callback(void* clientp, double dltotal, double dlnow,
                                           double ultotal, double ulnow);
 };
@@ -170,7 +173,6 @@ private:
     std::unique_ptr<ITTSEngine> primary_;
     std::unique_ptr<ITTSEngine> fallback_;
     std::atomic<int>  consecutive_failures_{0};
-    mutable std::atomic<int> last_active_sr_{0};  
     static constexpr int kFailoverThreshold = 3;
 };
 

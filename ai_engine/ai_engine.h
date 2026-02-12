@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <functional>
 #include <cstdint>
+#include <cstdio>
 #include "openai_realtime.h"
 #include "sentence_buffer.h"
 #include "tts_engine.h"
@@ -24,6 +25,33 @@ typedef struct SpeexResamplerState_ SpeexResamplerState;
 
 namespace ai_engine {
 
+/* ---- Shared JSON string escaping utility ---- */
+inline std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 16);
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
+                    out += buf;
+                } else {
+                    out += c;
+                }
+                break;
+        }
+    }
+    return out;
+}
+
 struct AIEngineConfig {
     
     OpenAIRealtimeConfig openai;
@@ -34,7 +62,7 @@ struct AIEngineConfig {
     TTSCacheConfig cache;
 
     int  freeswitch_sample_rate = 8000;   
-    int  openai_send_rate       = 16000;  
+    int  openai_send_rate       = 24000;  
     int  tts_worker_threads     = 1;       
     int  inject_buffer_ms       = 5000;   
     bool enable_barge_in        = true;    
@@ -112,6 +140,8 @@ private:
     std::atomic<bool>           tts_abort_{false};
     std::atomic<int>            reconnect_attempts_{0};
     static constexpr int        kMaxReconnectAttempts = 5;
+    std::thread                 reconnect_thread_;
+    std::mutex                  reconnect_mutex_;
     std::mutex                  sentence_mutex_;
     std::thread                         tts_thread_;
     std::queue<TTSWorkItem>             tts_queue_;

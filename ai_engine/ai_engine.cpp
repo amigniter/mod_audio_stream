@@ -170,6 +170,14 @@ void AIEngine::stop() {
         tts_thread_.join();
     }
 
+    /* Join any in-flight reconnect thread */
+    {
+        std::lock_guard<std::mutex> rlock(reconnect_mutex_);
+        if (reconnect_thread_.joinable()) {
+            reconnect_thread_.join();
+        }
+    }
+
     if (openai_) {
         openai_->disconnect();
         openai_.reset();
@@ -222,8 +230,22 @@ void AIEngine::feed_audio(const int16_t* samples, size_t num_samples) {
 size_t AIEngine::read_audio(int16_t* dest, size_t num_samples) {
     if (!ring_buffer_ || !dest || num_samples == 0) return 0;
 
+    /* Try to read exactly the requested number of samples */
     if (ring_buffer_->read_pcm16(dest, num_samples)) {
         return num_samples;
+    }
+
+    /*
+     * If we couldn't get a full frame, try to read whatever is available.
+     * This prevents audio gaps when the ring buffer has partial data.
+     */
+    size_t avail = ring_buffer_->available_samples();
+    if (avail > 0 && avail < num_samples) {
+        if (ring_buffer_->read_pcm16(dest, avail)) {
+            /* Zero-fill the remainder */
+            memset(dest + avail, 0, (num_samples - avail) * sizeof(int16_t));
+            return num_samples;
+        }
     }
 
     return 0;
@@ -243,6 +265,7 @@ void AIEngine::handle_barge_in() {
         openai_->cancel_response();
     }
 
+    /* Set abort flag — TTS worker will see this and skip current work */
     tts_abort_.store(true, std::memory_order_release);
 
     flush_tts_queue();
@@ -256,6 +279,12 @@ void AIEngine::handle_barge_in() {
         sentence_buffer_.reset();
     }
 
+    /*
+     * Give the TTS worker time to observe the abort flag before clearing it.
+     * The worker checks tts_abort_ at the top of each iteration and before
+     * each TTS chunk callback, so a short sleep is sufficient.
+     */
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
     tts_abort_.store(false, std::memory_order_release);
 
     set_state(AIEngineState::LISTENING, "Barge-in — listening");
@@ -276,7 +305,7 @@ void AIEngine::on_openai_connected(const std::string& session_id) {
     set_state(AIEngineState::LISTENING, "Connected — listening for speech");
 
     if (cb_event_) {
-        cb_event_("openai_connected", "{\"session_id\":\"" + session_id + "\"}");
+        cb_event_("openai_connected", "{\"session_id\":\"" + json_escape(session_id) + "\"}");
     }
 }
 
@@ -385,15 +414,7 @@ void AIEngine::on_openai_input_transcript(const std::string& transcript) {
     AI_LOG_INFO("(%s) User said: '%s'\n", cfg_.session_uuid.c_str(), transcript.c_str());
 
     if (cb_event_) {
-        std::string json = "{\"transcript\":\"";
-        for (char c : transcript) {
-            if (c == '"') json += "\\\"";
-            else if (c == '\\') json += "\\\\";
-            else if (c == '\n') json += "\\n";
-            else json += c;
-        }
-        json += "\"}";
-        cb_event_("user_transcript", json);
+        cb_event_("user_transcript", "{\"transcript\":\"" + json_escape(transcript) + "\"}");
     }
 }
 
@@ -403,7 +424,8 @@ void AIEngine::on_openai_error(const std::string& error, const std::string& code
     set_state(AIEngineState::ERROR, error);
 
     if (cb_event_) {
-        cb_event_("openai_error", "{\"error\":\"" + error + "\",\"code\":\"" + code + "\"}");
+        cb_event_("openai_error", "{\"error\":\"" + json_escape(error) +
+                  "\",\"code\":\"" + json_escape(code) + "\"}");
     }
 }
 
@@ -420,16 +442,60 @@ void AIEngine::on_openai_connection_change(bool connected) {
                             cfg_.session_uuid.c_str(), delay_ms,
                             retries + 1, kMaxReconnectAttempts);
 
-                std::thread([this, delay_ms]() {
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(delay_ms));
-                    if (running_.load(std::memory_order_relaxed) && openai_) {
-                        AI_LOG_INFO("(%s) Attempting OpenAI reconnect...\n",
-                                    cfg_.session_uuid.c_str());
-                        set_state(AIEngineState::CONNECTING, "Reconnecting");
-                        openai_->connect(cfg_.openai);
+                /* Use a joinable thread, replacing any previous reconnect thread */
+                {
+                    std::lock_guard<std::mutex> rlock(reconnect_mutex_);
+                    if (reconnect_thread_.joinable()) {
+                        reconnect_thread_.join();
                     }
-                }).detach();
+                    reconnect_thread_ = std::thread([this, delay_ms]() {
+                        std::this_thread::sleep_for(
+                            std::chrono::milliseconds(delay_ms));
+                        if (running_.load(std::memory_order_relaxed)) {
+                            AI_LOG_INFO("(%s) Attempting OpenAI reconnect...\n",
+                                        cfg_.session_uuid.c_str());
+                            set_state(AIEngineState::CONNECTING, "Reconnecting");
+
+                            /*
+                             * Create a fresh WebSocket client for the reconnect.
+                             * Many WS libraries don't support reconnect on same
+                             * object after close/error. This guarantees clean state.
+                             */
+                            if (openai_) {
+                                openai_->disconnect();
+                            }
+
+                            auto fresh = std::make_unique<OpenAIRealtimeClient>();
+                            fresh->on_session_created([this](const std::string& sid) {
+                                on_openai_connected(sid);
+                            });
+                            fresh->on_response_text_delta([this](const std::string& delta, const std::string& rid) {
+                                on_openai_text_delta(delta, rid);
+                            });
+                            fresh->on_response_done([this](const std::string& text, const std::string& rid) {
+                                on_openai_response_done(text, rid);
+                            });
+                            fresh->on_speech_started([this]() {
+                                on_openai_speech_started();
+                            });
+                            fresh->on_speech_stopped([this]() {
+                                on_openai_speech_stopped();
+                            });
+                            fresh->on_input_transcript_done([this](const std::string& transcript) {
+                                on_openai_input_transcript(transcript);
+                            });
+                            fresh->on_error([this](const std::string& error, const std::string& code) {
+                                on_openai_error(error, code);
+                            });
+                            fresh->on_connection_change([this](bool connected) {
+                                on_openai_connection_change(connected);
+                            });
+
+                            openai_ = std::move(fresh);
+                            openai_->connect(cfg_.openai);
+                        }
+                    });
+                }
             } else {
                 AI_LOG_ERROR("(%s) Max reconnect attempts (%d) reached\n",
                              cfg_.session_uuid.c_str(), kMaxReconnectAttempts);
@@ -493,11 +559,18 @@ void AIEngine::process_tts_item(const TTSWorkItem& item) {
     }
 
     std::vector<int16_t> cache_buffer;
+    /*
+     * Capture a mutable SR that can be updated by the TTS callback.
+     * With FailoverTTS, the primary might fail and fallback runs at a
+     * different sample rate. We get the correct SR by querying the engine
+     * AFTER synthesize() returns (which reflects which engine actually ran).
+     * But for streaming chunks we need a reasonable initial value.
+     */
     int tts_sr = tts_engine_->output_sample_rate();
 
     bool success = tts_engine_->synthesize(
         item.sentence,
-        [this, &cache_buffer, tts_sr](const int16_t* samples, size_t count,
+        [this, &cache_buffer, &tts_sr](const int16_t* samples, size_t count,
                                        bool is_final, const std::string& sentence) {
             if (samples && count > 0) {
                 cache_buffer.insert(cache_buffer.end(), samples, samples + count);
@@ -511,6 +584,13 @@ void AIEngine::process_tts_item(const TTSWorkItem& item) {
         },
         tts_abort_
     );
+
+    /*
+     * After synthesize returns, get the actual SR of whatever engine ran.
+     * This is used for caching — the cached entry must store the correct SR
+     * so on cache hit the resampler uses the right rate.
+     */
+    tts_sr = tts_engine_->output_sample_rate();
 
     if (success && tts_cache_ && !cache_buffer.empty()) {
         tts_cache_->put(item.sentence, cache_buffer, tts_sr);

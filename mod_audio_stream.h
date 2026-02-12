@@ -9,6 +9,7 @@ extern "C" {
 #endif
 
 #define MY_BUG_NAME        "audio_stream"
+#define MY_BUG_NAME_AI     "audio_stream_ai"
 #define MAX_SESSION_ID     (256)
 #define MAX_WS_URI         (4096)
 #define MAX_METADATA_LEN   (8192)

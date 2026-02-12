@@ -133,6 +133,7 @@ size_t TTSCache::size() const {
 }
 
 double TTSCache::hit_rate() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     size_t total = hits_ + misses_;
     if (total == 0) return 0.0;
     return (double)hits_ / (double)total;

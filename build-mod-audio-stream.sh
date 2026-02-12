@@ -9,6 +9,6 @@ if [ -d "$FS_PKGCONFIG" ]; then
 fi
 
 mkdir build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release ..
+cmake -DCMAKE_BUILD_TYPE=Release -DUSE_TLS=ON ..
 make
 make install

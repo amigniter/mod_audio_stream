@@ -66,12 +66,28 @@ void DSPPipeline::init(const DSPConfig& cfg) {
 void DSPPipeline::process(int16_t* samples, size_t num_samples) {
     if (!initialized_ || !samples || num_samples == 0) return;
 
-    {
+    /*
+     * Quick silence check — sample a few positions instead of scanning
+     * the entire buffer. TTS output is virtually never all-zero, so
+     * this is a fast-path optimization for the rare silence case.
+     */
+    if (num_samples <= 8) {
         bool all_silent = true;
         for (size_t i = 0; i < num_samples; ++i) {
             if (samples[i] != 0) { all_silent = false; break; }
         }
         if (all_silent) return;
+    } else {
+        /* Check first, middle, and last samples */
+        if (samples[0] == 0 && samples[num_samples / 2] == 0 &&
+            samples[num_samples - 1] == 0 && samples[num_samples / 4] == 0) {
+            /* Looks likely silent — do a full scan only if heuristic passes */
+            bool all_silent = true;
+            for (size_t i = 0; i < num_samples; ++i) {
+                if (samples[i] != 0) { all_silent = false; break; }
+            }
+            if (all_silent) return;
+        }
     }
 
     if (cfg_.dc_blocker_enabled)     dc_blocker_.process(samples, num_samples);

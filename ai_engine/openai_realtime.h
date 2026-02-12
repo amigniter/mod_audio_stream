@@ -24,7 +24,7 @@ struct OpenAIRealtimeConfig {
     float       vad_threshold  = 0.5f;
     int         vad_prefix_padding_ms  = 300;
     int         vad_silence_duration_ms = 500;
-    int         input_sample_rate  = 16000;   
+    int         input_sample_rate  = 24000;   
     std::string input_audio_format = "pcm16"; 
     bool        eagerly_emit_text  = true;    
     float       temperature        = 0.8f;

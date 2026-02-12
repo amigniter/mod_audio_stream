@@ -198,7 +198,7 @@ private:
             client.setPingInterval(heart_beat);
 
         if(deflate)
-            client.enableCompression(false);
+            client.enableCompression(true);
 
         if(!hdrs.empty())
             client.setHeaders(hdrs);
@@ -538,7 +538,7 @@ private:
             }
 
             try {
-                decoded = base64_decode(jsonAudio->valuestring);
+                decoded = base64_decode(std::string(jsonAudio->valuestring));
             } catch (const std::exception& e) {
                 push_err(out, m_sessionId, "processMessage - base64 decode error: " + std::string(e.what()));
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,

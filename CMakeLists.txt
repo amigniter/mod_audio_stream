@@ -6,8 +6,10 @@ project(mod_audio_stream
 
 include(GNUInstallDirs)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_SHARED_LIBRARY_PREFIX "")
+set(CMAKE_SHARED_LIBRARY_SUFFIX ".so")
 set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -g")
 
 option(ENABLE_LOCAL "Enable local compile/debug specific" OFF)
@@ -19,6 +21,11 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 find_package(PkgConfig REQUIRED)
 find_package(SpeexDSP REQUIRED)
 find_package(CURL REQUIRED)
+
+# The AI engine connects to wss://api.openai.com which requires TLS.
+# Force USE_TLS=ON in the WebSocket sub-library so OpenSSL is linked.
+set(USE_TLS ON CACHE BOOL "Enable TLS/SSL support using OpenSSL" FORCE)
+find_package(OpenSSL REQUIRED)
 
 # FreeSWITCH discovery
 # Prefer pkg-config (normal installs). If you only have a FreeSWITCH source tree

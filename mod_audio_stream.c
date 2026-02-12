@@ -230,6 +230,8 @@ static switch_status_t start_capture(switch_core_session_t *session,
     int channels = (flags & SMBF_STEREO) ? 2 : 1;
 
     if (switch_channel_get_private(channel, MY_BUG_NAME)) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                          "start_capture: streaming bug already running on this channel\n");
         return SWITCH_STATUS_FALSE;
     }
 
@@ -283,16 +285,22 @@ static switch_status_t start_capture(switch_core_session_t *session,
 static switch_status_t do_stop(switch_core_session_t *session, char* text)
 {
     switch_channel_t *channel = switch_core_session_get_channel(session);
-    switch_media_bug_t *bug = (switch_media_bug_t *)switch_channel_get_private(channel, MY_BUG_NAME);
 
-    if (bug) {
-        private_t *tech_pvt = (private_t *)switch_core_media_bug_get_user_data(bug);
-        if (tech_pvt && tech_pvt->ai_cfg.ai_mode_enabled) {
-            ai_engine_session_cleanup(session, 0);
-            return SWITCH_STATUS_SUCCESS;
-        }
+    /* Check AI bug first */
+    switch_media_bug_t *ai_bug = (switch_media_bug_t *)switch_channel_get_private(channel, MY_BUG_NAME_AI);
+    if (ai_bug) {
+        return ai_engine_session_cleanup(session, 0);
     }
-    return stream_session_cleanup(session, text, 0);
+
+    /* Then check regular streaming bug */
+    switch_media_bug_t *bug = (switch_media_bug_t *)switch_channel_get_private(channel, MY_BUG_NAME);
+    if (bug) {
+        return stream_session_cleanup(session, text, 0);
+    }
+
+    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                      "do_stop: no bug found\n");
+    return SWITCH_STATUS_FALSE;
 }
 
 static switch_status_t do_pauseresume(switch_core_session_t *session, int pause)
@@ -312,7 +320,7 @@ static switch_status_t start_capture_ai(switch_core_session_t *session)
     switch_codec_t *read_codec;
     private_t *tech_pvt = NULL;
 
-    if (switch_channel_get_private(channel, MY_BUG_NAME)) {
+    if (switch_channel_get_private(channel, MY_BUG_NAME_AI)) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
                           "start_capture_ai: bug already running\n");
         return SWITCH_STATUS_FALSE;
@@ -353,7 +361,7 @@ static switch_status_t start_capture_ai(switch_core_session_t *session)
 
     if (switch_core_media_bug_add(
             session,
-            MY_BUG_NAME,
+            MY_BUG_NAME_AI,
             NULL,
             capture_callback,
             tech_pvt,
@@ -365,7 +373,7 @@ static switch_status_t start_capture_ai(switch_core_session_t *session)
         return SWITCH_STATUS_FALSE;
     }
 
-    switch_channel_set_private(channel, MY_BUG_NAME, bug);
+    switch_channel_set_private(channel, MY_BUG_NAME_AI, bug);
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
                       "(%s) AI voice agent started, rate=%d\n",
@@ -481,9 +489,41 @@ done:
     return SWITCH_STATUS_SUCCESS;
 }
 
+/*
+ * Dialplan application: starts the AI voice agent on the current session.
+ * Usage: <action application="audio_stream_ai"/>
+ * The app starts AI capture, then plays silence to keep the channel open.
+ */
+SWITCH_STANDARD_APP(audio_stream_ai_app_function)
+{
+    switch_channel_t *channel = switch_core_session_get_channel(session);
+
+    if (switch_channel_get_private(channel, MY_BUG_NAME_AI)) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                          "audio_stream_ai app: already running on this channel\n");
+        return;
+    }
+
+    if (start_capture_ai(session) != SWITCH_STATUS_SUCCESS) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                          "audio_stream_ai app: failed to start AI engine\n");
+        return;
+    }
+
+    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+                      "(%s) audio_stream_ai app: AI engine started, playing silence to hold channel\n",
+                      switch_core_session_get_uuid(session));
+
+    /* Play infinite silence to keep the channel alive.
+     * The media bug handles read/write frames in the background.
+     * When the caller hangs up, the bug CLOSE callback cleans up. */
+    switch_ivr_play_file(session, NULL, "silence_stream://-1", NULL);
+}
+
 SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
 {
     switch_api_interface_t *api_interface;
+    switch_application_interface_t *app_interface;
 
     *module_interface =
         switch_loadable_module_create_module_interface(pool, modname);
@@ -503,6 +543,16 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
         "audio stream",
         stream_function,
         STREAM_API_SYNTAX
+    );
+
+    SWITCH_ADD_APP(
+        app_interface,
+        "audio_stream_ai",
+        "AI Voice Agent",
+        "Start AI voice agent on this channel (OpenAI Realtime + TTS)",
+        audio_stream_ai_app_function,
+        "",
+        SAF_NONE
     );
 
     return SWITCH_STATUS_SUCCESS;

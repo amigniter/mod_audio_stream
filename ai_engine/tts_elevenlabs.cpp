@@ -43,14 +43,17 @@ void ElevenLabsTTS::build_url() {
 }
 
 std::string ElevenLabsTTS::compute_output_format(int sample_rate) {
-    switch (sample_rate) {
-        case 8000:  return "pcm_16000"; 
-        case 16000: return "pcm_16000";
-        case 22050: return "pcm_22050";
-        case 24000: return "pcm_24000";
-        case 44100: return "pcm_44100";
-        default:    return "pcm_16000";
-    }
+    /*
+     * ElevenLabs API only supports: pcm_16000, pcm_22050, pcm_24000, pcm_44100.
+     * Pick the LOWEST format that is >= requested rate to minimize bandwidth,
+     * then let the caller resample down to the actual desired rate.
+     * The output_sr_ will reflect the TRUE API rate, and the engine
+     * will resample from that to the FreeSWITCH rate.
+     */
+    if (sample_rate <= 16000) return "pcm_16000";
+    if (sample_rate <= 22050) return "pcm_22050";
+    if (sample_rate <= 24000) return "pcm_24000";
+    return "pcm_44100";
 }
 
 int ElevenLabsTTS::actual_api_sample_rate(const std::string& format_str) {
@@ -260,7 +263,9 @@ bool ElevenLabsTTS::synthesize(
     return success;
 }
 
-OpenAITTS::OpenAITTS() {}
+OpenAITTS::OpenAITTS() {
+    ensure_curl_init();
+}
 OpenAITTS::~OpenAITTS() {}
 
 void OpenAITTS::configure(const TTSConfig& cfg) {
@@ -300,23 +305,50 @@ size_t OpenAITTS::curl_write_callback(char* ptr, size_t size, size_t nmemb, void
         return 0;
     }
 
+    /* Skip body processing if HTTP error was detected */
+    if (ctx->had_error) {
+        return total;
+    }
+
     ctx->pcm_buffer.insert(ctx->pcm_buffer.end(), ptr, ptr + total);
 
     const size_t chunk_bytes = 960;
 
-    size_t pos = 0;
-    while (ctx->pcm_buffer.size() - pos >= chunk_bytes) {
+    while (ctx->pcm_buffer.size() - ctx->pcm_buffer_pos >= chunk_bytes) {
         const int16_t* samples = reinterpret_cast<const int16_t*>(
-            ctx->pcm_buffer.data() + pos
+            ctx->pcm_buffer.data() + ctx->pcm_buffer_pos
         );
         if (ctx->audio_cb) {
             ctx->audio_cb(samples, chunk_bytes / 2, false, ctx->sentence);
         }
-        pos += chunk_bytes;
+        ctx->pcm_buffer_pos += chunk_bytes;
     }
 
-    if (pos > 0) {
-        ctx->pcm_buffer.erase(ctx->pcm_buffer.begin(), ctx->pcm_buffer.begin() + pos);
+    /* Compact buffer periodically to prevent unbounded growth */
+    if (ctx->pcm_buffer_pos > 8192) {
+        ctx->pcm_buffer.erase(
+            ctx->pcm_buffer.begin(),
+            ctx->pcm_buffer.begin() + ctx->pcm_buffer_pos
+        );
+        ctx->pcm_buffer_pos = 0;
+    }
+
+    return total;
+}
+
+size_t OpenAITTS::curl_header_callback(char* buffer, size_t size, size_t nitems, void* userdata) {
+    auto* ctx = static_cast<CurlWriteContext*>(userdata);
+    size_t total = size * nitems;
+
+    std::string header(buffer, total);
+    if (header.find("HTTP/") == 0) {
+        size_t space1 = header.find(' ');
+        if (space1 != std::string::npos) {
+            ctx->http_status = atoi(header.c_str() + space1 + 1);
+            if (ctx->http_status >= 400) {
+                ctx->had_error = true;
+            }
+        }
     }
 
     return total;
@@ -354,6 +386,8 @@ bool OpenAITTS::synthesize(
     ctx.sentence   = text;
     ctx.sample_rate = 24000;
     ctx.had_error  = false;
+    ctx.http_status = 0;
+    ctx.pcm_buffer_pos = 0;
 
     struct curl_slist* headers = nullptr;
     headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -367,31 +401,43 @@ bool OpenAITTS::synthesize(
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, curl_header_callback);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &ctx);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, curl_progress_callback);
     curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, &ctx);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, (long)cfg_.connect_timeout_ms);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)cfg_.request_timeout_ms);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
     curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1L);
 
     CURLcode res = curl_easy_perform(curl);
 
     bool success = false;
-    if (res == CURLE_OK) {
-        size_t rem = ctx.pcm_buffer.size();
+    if (res == CURLE_OK && !ctx.had_error) {
+        size_t rem = ctx.pcm_buffer.size() - ctx.pcm_buffer_pos;
         if (rem >= 2 && audio_cb) {
             rem = (rem / 2) * 2;
-            audio_cb(reinterpret_cast<const int16_t*>(ctx.pcm_buffer.data()),
+            audio_cb(reinterpret_cast<const int16_t*>(
+                         ctx.pcm_buffer.data() + ctx.pcm_buffer_pos),
                      rem / 2, true, text);
         } else if (audio_cb) {
             audio_cb(nullptr, 0, true, text);
         }
         success = true;
-    } else if (res != CURLE_ABORTED_BY_CALLBACK) {
-        if (error_cb) {
-            error_cb(std::string("OpenAI TTS error: ") + curl_easy_strerror(res), (int)res);
+    } else if (res == CURLE_ABORTED_BY_CALLBACK) {
+        success = false;
+    } else {
+        std::string err_msg;
+        if (ctx.had_error) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "OpenAI TTS API error: HTTP %d", ctx.http_status);
+            err_msg = buf;
+        } else {
+            err_msg = std::string("OpenAI TTS error: ") + curl_easy_strerror(res);
         }
+        if (error_cb) error_cb(err_msg, (int)res);
     }
 
     curl_slist_free_all(headers);
@@ -414,9 +460,13 @@ void FailoverTTS::configure(const TTSConfig& cfg) {
 }
 
 int FailoverTTS::output_sample_rate() const {
-    int active_sr = last_active_sr_.load(std::memory_order_relaxed);
-    if (active_sr > 0) return active_sr;
-    if (consecutive_failures_.load(std::memory_order_relaxed) >= kFailoverThreshold && fallback_) {
+    /*
+     * Return the sample rate of whichever engine will actually be used next.
+     * This avoids a race where the caller gets primary's SR but failover
+     * triggers and actually uses fallback's SR.
+     */
+    int failures = consecutive_failures_.load(std::memory_order_relaxed);
+    if (failures >= kFailoverThreshold && fallback_) {
         return fallback_->output_sample_rate();
     }
     return primary_ ? primary_->output_sample_rate() : 16000;
@@ -431,7 +481,6 @@ bool FailoverTTS::synthesize(
     int failures = consecutive_failures_.load(std::memory_order_relaxed);
 
     if (failures < kFailoverThreshold && primary_) {
-        last_active_sr_.store(primary_->output_sample_rate(), std::memory_order_relaxed);
         bool ok = primary_->synthesize(text, audio_cb, error_cb, abort_flag);
         if (ok) {
             consecutive_failures_.store(0, std::memory_order_relaxed);
@@ -441,7 +490,6 @@ bool FailoverTTS::synthesize(
     }
 
     if (fallback_) {
-        last_active_sr_.store(fallback_->output_sample_rate(), std::memory_order_relaxed);
         return fallback_->synthesize(text, audio_cb, error_cb, abort_flag);
     }
 

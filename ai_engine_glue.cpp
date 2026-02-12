@@ -189,7 +189,7 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
         engine_cfg.openai.vad_silence_duration_ms = ai_cfg.vad_silence_duration_ms;
         engine_cfg.openai.temperature = ai_cfg.temperature;
         engine_cfg.openai.max_response_output_tokens = ai_cfg.max_response_tokens;
-        engine_cfg.openai.input_sample_rate = 16000;
+        engine_cfg.openai.input_sample_rate = 24000;
         engine_cfg.tts.provider = ai_cfg.tts_provider;
         engine_cfg.tts.elevenlabs_api_key = ai_cfg.elevenlabs_api_key;
         engine_cfg.tts.elevenlabs_voice_id = ai_cfg.elevenlabs_voice_id;
@@ -212,7 +212,7 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
         engine_cfg.dsp.high_shelf_gain_db = ai_cfg.high_shelf_gain_db;
         engine_cfg.dsp.lpf_cutoff_hz = ai_cfg.lpf_cutoff_hz;
         engine_cfg.freeswitch_sample_rate = sampling;
-        engine_cfg.openai_send_rate = 16000;
+        engine_cfg.openai_send_rate = 24000;
         engine_cfg.enable_barge_in = ai_cfg.enable_barge_in;
         engine_cfg.debug_logging = ai_cfg.debug_ai;
         engine_cfg.session_uuid = uuid;
@@ -289,7 +289,7 @@ switch_size_t ai_engine_read_audio(private_t *tech_pvt, int16_t* dest, size_t nu
 switch_status_t ai_engine_session_cleanup(switch_core_session_t *session,
                                            int channelIsClosing) {
     switch_channel_t *channel = switch_core_session_get_channel(session);
-    auto *bug = (switch_media_bug_t*)switch_channel_get_private(channel, MY_BUG_NAME);
+    auto *bug = (switch_media_bug_t*)switch_channel_get_private(channel, MY_BUG_NAME_AI);
 
     if (!bug) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
@@ -312,7 +312,7 @@ switch_status_t ai_engine_session_cleanup(switch_core_session_t *session,
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
                       "(%s) ai_engine_session_cleanup\n", tech_pvt->sessionId);
 
-    switch_channel_set_private(channel, MY_BUG_NAME, nullptr);
+    switch_channel_set_private(channel, MY_BUG_NAME_AI, nullptr);
 
     auto* engine = static_cast<ai_engine::AIEngine*>(tech_pvt->pAIEngine);
     tech_pvt->pAIEngine = nullptr;

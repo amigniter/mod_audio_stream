@@ -87,7 +87,9 @@ public:
             else
                 envelope_ += release_coeff_ * (x - envelope_);
             float target = (envelope_ > threshold_) ? 1.0f : 0.0f;
-            gain_ += release_coeff_ * (target - gain_);
+            /* Use attack coeff when opening gate, release when closing */
+            float coeff = (target > gain_) ? attack_coeff_ : release_coeff_;
+            gain_ += coeff * (target - gain_);
             float out = static_cast<float>(samples[i]) * gain_;
             samples[i] = clamp16(out);
         }
@@ -315,12 +317,17 @@ public:
         ratio_ = ratio;
         envelope_ = 0.0f;
         release_coeff_ = 1.0f - expf(-1.0f / (10.0f * sample_rate / 1000.0f));
+        det_buf_.clear();
     }
     void process(int16_t* samples, size_t n) {
-        std::vector<int16_t> det_copy(samples, samples + n);
-        detector_.process(det_copy.data(), n);
+        /* Reuse pre-allocated buffer to avoid heap alloc in audio path */
+        if (det_buf_.size() < n) {
+            det_buf_.resize(n);
+        }
+        std::memcpy(det_buf_.data(), samples, n * sizeof(int16_t));
+        detector_.process(det_buf_.data(), n);
         for (size_t i = 0; i < n; ++i) {
-            float det_level = std::fabs(static_cast<float>(det_copy[i]) / 32768.0f);
+            float det_level = std::fabs(static_cast<float>(det_buf_[i]) / 32768.0f);
             if (det_level > envelope_)
                 envelope_ = det_level;
             else
@@ -339,6 +346,7 @@ private:
     float ratio_         = 4.0f;
     float envelope_      = 0.0f;
     float release_coeff_ = 0.0f;
+    std::vector<int16_t> det_buf_; /* pre-allocated detector scratch buffer */
     static inline int16_t clamp16(float v) {
         if (v > 32767.0f) return 32767;
         if (v < -32768.0f) return -32768;

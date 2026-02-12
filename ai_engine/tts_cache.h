@@ -40,8 +40,14 @@ public:
     void clear();
 
     size_t size() const;
-    size_t hits() const { return hits_; }
-    size_t misses() const { return misses_; }
+    size_t hits() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return hits_;
+    }
+    size_t misses() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return misses_;
+    }
     double hit_rate() const;
 
 private:
