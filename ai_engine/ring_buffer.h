@@ -254,9 +254,34 @@ public:
 
 
 
+    /**
+     * Flush all data. MUST only be called from the consumer thread.
+     */
     void flush() {
+        flush_requested_.store(false, std::memory_order_relaxed);
         const size_t h = head_.load(std::memory_order_acquire);
         tail_.store(h, std::memory_order_release);
+    }
+
+    /**
+     * Request a flush from any thread. The consumer thread should call
+     * check_flush_request() at the top of each read cycle to execute it.
+     * This is safe to call from any thread (including non-producer/non-consumer).
+     */
+    void request_flush() {
+        flush_requested_.store(true, std::memory_order_release);
+    }
+
+    /**
+     * Check if a flush was requested and execute it. Call from consumer thread.
+     * Returns true if a flush was performed.
+     */
+    bool check_flush_request() {
+        if (flush_requested_.load(std::memory_order_acquire)) {
+            flush();
+            return true;
+        }
+        return false;
     }
 
 
@@ -305,6 +330,7 @@ private:
 
     alignas(kCacheLineSize) std::atomic<size_t> head_{0};
     alignas(kCacheLineSize) std::atomic<size_t> tail_{0};
+    alignas(kCacheLineSize) std::atomic<bool>   flush_requested_{false};
 
 
     char pad_[kCacheLineSize - sizeof(std::atomic<size_t>)]{};

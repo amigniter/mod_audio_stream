@@ -142,31 +142,19 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
         return SWITCH_STATUS_FALSE;
     }
 
-    {
-        int inject_ms = get_channel_var_int(session, "STREAM_INJECT_BUFFER_MS", 5000);
-        size_t inject_bytes_per_ms = (size_t)sampling * 2 * channels / 1000;
-        size_t inject_buflen = inject_bytes_per_ms * inject_ms;
-        if (inject_buflen < 3200) inject_buflen = 3200;
+    /*
+     * AI mode uses AIEngine's internal SPSCRingBuffer for audio injection,
+     * NOT tech_pvt->inject_buffer. The inject_buffer and scratch buffers
+     * are only needed for the WebSocket streaming mode. Skip allocation.
+     */
+    tech_pvt->inject_buffer = NULL;
+    tech_pvt->inject_sample_rate = sampling;
+    tech_pvt->inject_bytes_per_sample = 2;
 
-        if (switch_buffer_create(pool, &tech_pvt->inject_buffer, inject_buflen) != SWITCH_STATUS_SUCCESS) {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                              "(%s) Error creating inject buffer for AI mode\n", uuid);
-            return SWITCH_STATUS_FALSE;
-        }
-        tech_pvt->inject_sample_rate = sampling;
-        tech_pvt->inject_bytes_per_sample = 2;
-    }
-
-    tech_pvt->read_scratch_len = SWITCH_RECOMMENDED_BUFFER_SIZE;
-    tech_pvt->read_scratch = (uint8_t*)switch_core_session_alloc(session, tech_pvt->read_scratch_len);
-    tech_pvt->inject_scratch_len = SWITCH_RECOMMENDED_BUFFER_SIZE;
-    tech_pvt->inject_scratch = (uint8_t*)switch_core_session_alloc(session, tech_pvt->inject_scratch_len);
-
-    if (!tech_pvt->read_scratch || !tech_pvt->inject_scratch) {
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                          "(%s) Error allocating scratch buffers\n", uuid);
-        return SWITCH_STATUS_FALSE;
-    }
+    tech_pvt->read_scratch_len = 0;
+    tech_pvt->read_scratch = NULL;
+    tech_pvt->inject_scratch_len = 0;
+    tech_pvt->inject_scratch = NULL;
 
     if ((int)samples_per_second != sampling) {
         int err = 0;
@@ -255,7 +243,7 @@ switch_status_t ai_engine_session_init(switch_core_session_t *session,
 switch_bool_t ai_engine_feed_frame(switch_media_bug_t *bug) {
     auto *tech_pvt = (private_t*)switch_core_media_bug_get_user_data(bug);
     if (!tech_pvt) return SWITCH_TRUE;
-    if (tech_pvt->audio_paused || tech_pvt->cleanup_started) return SWITCH_TRUE;
+    if (switch_atomic_read(&tech_pvt->audio_paused) || switch_atomic_read(&tech_pvt->cleanup_started)) return SWITCH_TRUE;
 
     auto* engine = static_cast<ai_engine::AIEngine*>(tech_pvt->pAIEngine);
     if (!engine || !engine->is_running()) return SWITCH_TRUE;
@@ -302,12 +290,12 @@ switch_status_t ai_engine_session_cleanup(switch_core_session_t *session,
 
     switch_mutex_lock(tech_pvt->mutex);
 
-    if (tech_pvt->cleanup_started) {
+    if (switch_atomic_read(&tech_pvt->cleanup_started)) {
         switch_mutex_unlock(tech_pvt->mutex);
         return SWITCH_STATUS_SUCCESS;
     }
-    tech_pvt->cleanup_started = SWITCH_TRUE;
-    tech_pvt->close_requested = SWITCH_TRUE;
+    switch_atomic_set(&tech_pvt->cleanup_started, SWITCH_TRUE);
+    switch_atomic_set(&tech_pvt->close_requested, SWITCH_TRUE);
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
                       "(%s) ai_engine_session_cleanup\n", tech_pvt->sessionId);

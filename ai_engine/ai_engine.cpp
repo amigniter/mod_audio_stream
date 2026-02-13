@@ -179,6 +179,7 @@ void AIEngine::stop() {
     }
 
     if (openai_) {
+        std::lock_guard<std::mutex> lock(openai_mutex_);
         openai_->disconnect();
         openai_.reset();
     }
@@ -209,16 +210,24 @@ bool AIEngine::is_running() const {
 
 void AIEngine::feed_audio(const int16_t* samples, size_t num_samples) {
     if (!running_.load(std::memory_order_relaxed)) return;
-    if (!openai_ || !openai_->is_connected()) return;
     if (!samples || num_samples == 0) return;
+
+    /* Resample under resampler_mutex_ (already protected) */
+    std::vector<int16_t> upsampled;
     if (upsample_resampler_) {
-        std::vector<int16_t> upsampled;
         resample_up(samples, num_samples, upsampled);
+        if (upsampled.empty()) return;
+    }
+
+    /* Access openai_ under openai_mutex_ to prevent race with reconnect thread */
+    {
+        std::lock_guard<std::mutex> lock(openai_mutex_);
+        if (!openai_ || !openai_->is_connected()) return;
         if (!upsampled.empty()) {
             openai_->send_audio(upsampled.data(), upsampled.size());
+        } else {
+            openai_->send_audio(samples, num_samples);
         }
-    } else {
-        openai_->send_audio(samples, num_samples);
     }
 
     {
@@ -229,6 +238,9 @@ void AIEngine::feed_audio(const int16_t* samples, size_t num_samples) {
 
 size_t AIEngine::read_audio(int16_t* dest, size_t num_samples) {
     if (!ring_buffer_ || !dest || num_samples == 0) return 0;
+
+    /* Check if barge-in requested a flush — execute from consumer thread */
+    ring_buffer_->check_flush_request();
 
     /* Try to read exactly the requested number of samples */
     if (ring_buffer_->read_pcm16(dest, num_samples)) {
@@ -261,8 +273,11 @@ void AIEngine::handle_barge_in() {
 
     AI_LOG_INFO("(%s) Barge-in triggered\n", cfg_.session_uuid.c_str());
 
-    if (openai_) {
-        openai_->cancel_response();
+    {
+        std::lock_guard<std::mutex> lock(openai_mutex_);
+        if (openai_) {
+            openai_->cancel_response();
+        }
     }
 
     /* Set abort flag — TTS worker will see this and skip current work */
@@ -270,8 +285,14 @@ void AIEngine::handle_barge_in() {
 
     flush_tts_queue();
 
+    /*
+     * Request flush via atomic flag — the consumer (media thread)
+     * will execute the actual flush on its next read_audio() call.
+     * This avoids violating the SPSC contract by modifying the tail
+     * from a non-consumer thread.
+     */
     if (ring_buffer_) {
-        ring_buffer_->flush();
+        ring_buffer_->request_flush();
     }
 
     {
@@ -461,38 +482,41 @@ void AIEngine::on_openai_connection_change(bool connected) {
                              * Many WS libraries don't support reconnect on same
                              * object after close/error. This guarantees clean state.
                              */
-                            if (openai_) {
-                                openai_->disconnect();
+                            {
+                                std::lock_guard<std::mutex> olock(openai_mutex_);
+                                if (openai_) {
+                                    openai_->disconnect();
+                                }
+
+                                auto fresh = std::make_unique<OpenAIRealtimeClient>();
+                                fresh->on_session_created([this](const std::string& sid) {
+                                    on_openai_connected(sid);
+                                });
+                                fresh->on_response_text_delta([this](const std::string& delta, const std::string& rid) {
+                                    on_openai_text_delta(delta, rid);
+                                });
+                                fresh->on_response_done([this](const std::string& text, const std::string& rid) {
+                                    on_openai_response_done(text, rid);
+                                });
+                                fresh->on_speech_started([this]() {
+                                    on_openai_speech_started();
+                                });
+                                fresh->on_speech_stopped([this]() {
+                                    on_openai_speech_stopped();
+                                });
+                                fresh->on_input_transcript_done([this](const std::string& transcript) {
+                                    on_openai_input_transcript(transcript);
+                                });
+                                fresh->on_error([this](const std::string& error, const std::string& code) {
+                                    on_openai_error(error, code);
+                                });
+                                fresh->on_connection_change([this](bool connected) {
+                                    on_openai_connection_change(connected);
+                                });
+
+                                openai_ = std::move(fresh);
+                                openai_->connect(cfg_.openai);
                             }
-
-                            auto fresh = std::make_unique<OpenAIRealtimeClient>();
-                            fresh->on_session_created([this](const std::string& sid) {
-                                on_openai_connected(sid);
-                            });
-                            fresh->on_response_text_delta([this](const std::string& delta, const std::string& rid) {
-                                on_openai_text_delta(delta, rid);
-                            });
-                            fresh->on_response_done([this](const std::string& text, const std::string& rid) {
-                                on_openai_response_done(text, rid);
-                            });
-                            fresh->on_speech_started([this]() {
-                                on_openai_speech_started();
-                            });
-                            fresh->on_speech_stopped([this]() {
-                                on_openai_speech_stopped();
-                            });
-                            fresh->on_input_transcript_done([this](const std::string& transcript) {
-                                on_openai_input_transcript(transcript);
-                            });
-                            fresh->on_error([this](const std::string& error, const std::string& code) {
-                                on_openai_error(error, code);
-                            });
-                            fresh->on_connection_change([this](bool connected) {
-                                on_openai_connection_change(connected);
-                            });
-
-                            openai_ = std::move(fresh);
-                            openai_->connect(cfg_.openai);
                         }
                     });
                 }
@@ -628,6 +652,11 @@ void AIEngine::on_tts_audio(const int16_t* samples, size_t count,
     }
     if (resampled.empty()) return;
     dsp_.process(resampled.data(), resampled.size());
+
+    /* Re-check abort flag after resample + DSP processing to minimize
+     * stale audio written to ring buffer during barge-in. */
+    if (tts_abort_.load(std::memory_order_acquire)) return;
+
     ring_buffer_->write_pcm16(resampled.data(), resampled.size());
     if (cb_audio_) {
         cb_audio_(resampled.data(), resampled.size(), cfg_.freeswitch_sample_rate);

@@ -127,6 +127,7 @@ private:
 
     AIEngineConfig                      cfg_;
     std::unique_ptr<OpenAIRealtimeClient> openai_;
+    std::mutex                          openai_mutex_;
     std::unique_ptr<ITTSEngine>         tts_engine_;
     std::unique_ptr<TTSCache>           tts_cache_;
     SentenceBuffer                      sentence_buffer_;

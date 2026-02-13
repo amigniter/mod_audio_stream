@@ -43,7 +43,7 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
 
     case SWITCH_ABC_TYPE_CLOSE:
         {
-            tech_pvt->close_requested = SWITCH_TRUE;
+            switch_atomic_set(&tech_pvt->close_requested, SWITCH_TRUE);
 
             int channel_closing = 1;
 
@@ -56,7 +56,7 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
         break;
 
     case SWITCH_ABC_TYPE_READ:
-        if (tech_pvt->close_requested) {
+        if (switch_atomic_read(&tech_pvt->close_requested)) {
             return SWITCH_FALSE;
         }
         if (tech_pvt->ai_cfg.ai_mode_enabled) {
@@ -143,22 +143,7 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
                 if (got >= need) {
                     memcpy(frame->data, inj, need);
                 } else {
-                   
-                    switch_mutex_lock(tech_pvt->mutex);
-                    if (tech_pvt->inject_buffer) {
-                        switch_size_t remaining = switch_buffer_inuse(tech_pvt->inject_buffer);
-                        if (remaining == 0) {
-                            switch_buffer_write(tech_pvt->inject_buffer, inj, got);
-                        } else if (remaining + got <= tech_pvt->read_scratch_len) {
-                            uint8_t *tmp = tech_pvt->read_scratch;
-                            switch_buffer_read(tech_pvt->inject_buffer, tmp, remaining);
-                            switch_buffer_zero(tech_pvt->inject_buffer);
-                            switch_buffer_write(tech_pvt->inject_buffer, inj, got);
-                            switch_buffer_write(tech_pvt->inject_buffer, tmp, remaining);
-                        } else {
-                        }
-                    }
-                    switch_mutex_unlock(tech_pvt->mutex);
+                    memcpy(frame->data, inj, got);
                 }
             }
 

@@ -292,7 +292,7 @@ private:
         if(bug) {
             auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
             if (tech_pvt) {
-                tech_pvt->close_requested = SWITCH_TRUE;
+                switch_atomic_set(&tech_pvt->close_requested, SWITCH_TRUE);
             }
             switch_core_media_bug_close(&bug, SWITCH_FALSE);
         }
@@ -654,6 +654,10 @@ private:
             push_err(out, m_sessionId, "processMessage - missing tech_pvt for injection");
             return out;
         }
+        if (switch_atomic_read(&tech_pvt->close_requested) || switch_atomic_read(&tech_pvt->cleanup_started)) {
+            push_err(out, m_sessionId, "processMessage - session closing, skipping injection");
+            return out;
+        }
         if (!tech_pvt->inject_buffer) {
             push_err(out, m_sessionId, "processMessage - inject_buffer not initialized");
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
@@ -693,41 +697,66 @@ private:
 
         if (sampleRate != out_sr) {
             SpeexResamplerState* local_resampler = nullptr;
+            bool need_new_resampler = false;
+            SpeexResamplerState* old_resampler = nullptr;
 
+            /* Check under mutex whether we need a new resampler */
             switch_mutex_lock(tech_pvt->mutex);
             if (!tech_pvt->inject_resampler) {
+                need_new_resampler = true;
+            } else {
+                spx_uint32_t in_r = 0, out_r = 0;
+                speex_resampler_get_rate(tech_pvt->inject_resampler, &in_r, &out_r);
+                if ((int)in_r != sampleRate || (int)out_r != out_sr) {
+                    old_resampler = tech_pvt->inject_resampler;
+                    tech_pvt->inject_resampler = nullptr;
+                    need_new_resampler = true;
+                }
+            }
+            if (!need_new_resampler) {
+                local_resampler = tech_pvt->inject_resampler;
+            }
+            switch_mutex_unlock(tech_pvt->mutex);
+
+            /* Destroy old resampler OUTSIDE mutex (heap free) */
+            if (old_resampler) {
+                speex_resampler_destroy(old_resampler);
+            }
+
+            /* Create new resampler OUTSIDE mutex (heap alloc + FIR computation) */
+            if (need_new_resampler) {
                 int err = 0;
-                tech_pvt->inject_resampler = speex_resampler_init(out_channels, sampleRate, out_sr,
-                                                                  INJECT_RESAMPLE_QUALITY, &err);
-                if (err != 0 || !tech_pvt->inject_resampler) {
-                    switch_mutex_unlock(tech_pvt->mutex);
+                SpeexResamplerState* fresh = speex_resampler_init(out_channels, sampleRate, out_sr,
+                                                                   INJECT_RESAMPLE_QUALITY, &err);
+                if (err != 0 || !fresh) {
                     push_err(out, m_sessionId, "processMessage - failed to init inject resampler");
                     return out;
                 }
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
                                   "(%s) processMessage: created inject resampler %d -> %d ch=%d quality=%d\n",
                                   m_sessionId.c_str(), sampleRate, out_sr, out_channels, INJECT_RESAMPLE_QUALITY);
-            } else {
-                spx_uint32_t in_r = 0, out_r = 0;
-                speex_resampler_get_rate(tech_pvt->inject_resampler, &in_r, &out_r);
-                if ((int)in_r != sampleRate || (int)out_r != out_sr) {
-                    speex_resampler_destroy(tech_pvt->inject_resampler);
-                    tech_pvt->inject_resampler = nullptr;
-                    int err = 0;
-                    tech_pvt->inject_resampler = speex_resampler_init(out_channels, sampleRate, out_sr,
-                                                                      INJECT_RESAMPLE_QUALITY, &err);
-                    if (err != 0 || !tech_pvt->inject_resampler) {
-                        switch_mutex_unlock(tech_pvt->mutex);
-                        push_err(out, m_sessionId, "processMessage - failed to reinit inject resampler");
-                        return out;
-                    }
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
-                                      "(%s) processMessage: re-created inject resampler %d -> %d ch=%d\n",
-                                      m_sessionId.c_str(), sampleRate, out_sr, out_channels);
+
+                /* Install under mutex */
+                switch_mutex_lock(tech_pvt->mutex);
+                if (tech_pvt->inject_resampler) {
+                    /* Another thread beat us — use theirs, destroy ours */
+                    switch_mutex_unlock(tech_pvt->mutex);
+                    speex_resampler_destroy(fresh);
+                    switch_mutex_lock(tech_pvt->mutex);
+                } else {
+                    tech_pvt->inject_resampler = fresh;
                 }
+                local_resampler = tech_pvt->inject_resampler;
+                switch_mutex_unlock(tech_pvt->mutex);
             }
-            local_resampler = tech_pvt->inject_resampler;
-            switch_mutex_unlock(tech_pvt->mutex);
+
+            /* Defensive: verify resampler and session are still valid before use */
+            if (!local_resampler ||
+                switch_atomic_read(&tech_pvt->close_requested) ||
+                switch_atomic_read(&tech_pvt->cleanup_started)) {
+                push_err(out, m_sessionId, "processMessage - resampler invalidated during setup");
+                return out;
+            }
 
             decoded = resample_pcm16le_speex((const uint8_t*)decoded.data(), decoded.size(), out_channels,
                                             sampleRate, out_sr, local_resampler);
@@ -751,6 +780,15 @@ private:
         }
 
         switch_mutex_lock(tech_pvt->mutex);
+
+        /* Re-check cleanup state under mutex before writing to inject_buffer */
+        if (switch_atomic_read(&tech_pvt->close_requested) ||
+            switch_atomic_read(&tech_pvt->cleanup_started) ||
+            !tech_pvt->inject_buffer) {
+            switch_mutex_unlock(tech_pvt->mutex);
+            push_err(out, m_sessionId, "processMessage - session closing before buffer write");
+            return out;
+        }
 
         tech_pvt->inject_sample_rate = out_sr;
         tech_pvt->inject_bytes_per_sample = 2;
@@ -1123,7 +1161,7 @@ extern "C" {
         if (!tech_pvt) return SWITCH_STATUS_FALSE;
 
         switch_core_media_bug_flush(bug);
-    tech_pvt->audio_paused = pause ? SWITCH_TRUE : SWITCH_FALSE;
+    switch_atomic_set(&tech_pvt->audio_paused, pause ? SWITCH_TRUE : SWITCH_FALSE);
         return SWITCH_STATUS_SUCCESS;
     }
 
@@ -1268,7 +1306,7 @@ extern "C" {
     switch_bool_t stream_frame(switch_media_bug_t *bug) {
         auto *tech_pvt = (private_t *)switch_core_media_bug_get_user_data(bug);
         if (!tech_pvt) return SWITCH_TRUE;
-        if (tech_pvt->audio_paused || tech_pvt->cleanup_started) return SWITCH_TRUE;
+        if (switch_atomic_read(&tech_pvt->audio_paused) || switch_atomic_read(&tech_pvt->cleanup_started)) return SWITCH_TRUE;
         
           std::shared_ptr<AudioStreamer> streamer;
 
@@ -1461,12 +1499,12 @@ extern "C" {
 
             switch_mutex_lock(tech_pvt->mutex);
 
-            if (tech_pvt->cleanup_started) {
+            if (switch_atomic_read(&tech_pvt->cleanup_started)) {
                 switch_mutex_unlock(tech_pvt->mutex);
                 return SWITCH_STATUS_SUCCESS;
             }
-            tech_pvt->cleanup_started = SWITCH_TRUE;
-            tech_pvt->close_requested = SWITCH_TRUE;
+            switch_atomic_set(&tech_pvt->cleanup_started, SWITCH_TRUE);
+            switch_atomic_set(&tech_pvt->close_requested, SWITCH_TRUE);
 
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) stream_session_cleanup\n", sessionId);
 
