@@ -1,5 +1,54 @@
-cmake-build-debug/
-.idea/
-.vscode/
+# Build directories
 build/
+_build/
+out/
+cmake-build-debug/
+cmake-build-release/
 _packages
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+install_manifest.txt
+CTestTestfile.cmake
+*.cmake
+!CMakeLists.txt
+
+# Compiled objects and libraries
+*.o
+*.lo
+*.la
+*.so
+*.so.*
+*.a
+*.dylib
+.libs/
+.deps/
+
+# Autotools (in case anything autotools sneaks in)
+autom4te.cache/
+config.log
+config.status
+configure
+aclocal.m4
+m4/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Debian packaging artifacts
+debian/files
+debian/*.substvars
+debian/*.log
+debian/*.debhelper
+debian/.debhelper/
+debian/tmp/
+debian/mod-audio-stream/
+*.deb
