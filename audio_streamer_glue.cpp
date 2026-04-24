@@ -1,4 +1,5 @@
 #include <string>
+#include <sstream>
 #include <cstring>
 #include "mod_audio_stream.h"
 #include "WebSocketClient.h"
@@ -43,7 +44,7 @@ public:
     }
 
     bool isConnected() {
-        return client.isConnected();
+        return client.isConnected() && m_isConnected.load(std::memory_order_acquire);
     }
 
     void writeBinary(uint8_t* buffer, size_t len) {
@@ -273,17 +274,21 @@ private:
 
         switch (event) {
             case CONNECT_SUCCESS:
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "connection succeeded\n");
                 send_initial_metadata(psession);
+                m_isConnected.store(true, std::memory_order_release);
                 m_notify(psession, EVENT_CONNECT, msg.c_str());
                 break;
 
             case CONNECTION_DROPPED:
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "connection closed\n");
+                m_isConnected.store(false, std::memory_order_release);
                 m_notify(psession, EVENT_DISCONNECT, msg.c_str());
                 break;
 
             case CONNECT_ERROR:
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "connection error\n");
+                m_isConnected.store(false, std::memory_order_release);
                 m_notify(psession, EVENT_ERROR, msg.c_str());
                 media_bug_close(psession);
                 break;
@@ -436,6 +441,7 @@ private:
     int m_playFile;
     std::unordered_set<std::string> m_Files;
     std::atomic<bool> m_cleanedUp{false};
+    std::atomic<bool> m_isConnected{ false };
     std::mutex m_stateMutex;
 };
 
@@ -443,7 +449,8 @@ private:
 namespace {
 
     switch_status_t stream_data_init(private_t *tech_pvt, switch_core_session_t *session, char *wsUri,
-                                     uint32_t sampling, int desiredSampling, int channels, char *metadata, responseHandler_t responseHandler,
+                                     uint32_t sampling, int desiredSampling, int channels, char *metadata,
+                                     int sendAsBinary, char *jsonHead, char *jsonTail, responseHandler_t responseHandler,
                                      int deflate, int heart_beat, bool suppressLog, int rtp_packets, const char* extra_headers,
                                      const char *tls_cafile, const char *tls_keyfile, const char *tls_certfile, 
                                      bool tls_disable_hostname_validation)
@@ -461,8 +468,11 @@ namespace {
         tech_pvt->rtp_packets = rtp_packets;
         tech_pvt->channels = channels;
         tech_pvt->audio_paused = 0;
+        tech_pvt->send_binary_audio = sendAsBinary;
 
         if (metadata) strncpy(tech_pvt->initialMetadata, metadata, MAX_METADATA_LEN);
+        if (jsonHead) strncpy(tech_pvt->audioJsonHead, jsonHead, MAX_JSON_HEAD_LEN);
+        if (jsonTail) strncpy(tech_pvt->audioJsonTail, jsonTail, MAX_JSON_TAIL_LEN);
 
         //size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PERIOD * BUFFERED_SEC);
         const size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * rtp_packets);
@@ -493,7 +503,10 @@ namespace {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) no resampling needed for this call\n", tech_pvt->sessionId);
         }
 
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) stream_data_init\n", tech_pvt->sessionId);
+        if (tech_pvt->send_binary_audio)
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) stream_data_init: sendAsBinary=TRUE\n", tech_pvt->sessionId);
+        else
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) stream_data_init: sendAsBinary=FALSE\n", tech_pvt->sessionId);
 
         return SWITCH_STATUS_SUCCESS;
     }
@@ -647,6 +660,9 @@ extern "C" {
                                         int sampling,
                                         int channels,
                                         char* metadata,
+                                        int sendAsBinary,
+                                        char *jsonHead,
+                                        char *jsonTail,
                                         void **ppUserData)
     {
         int deflate, heart_beat;
@@ -706,7 +722,7 @@ extern "C" {
             return SWITCH_STATUS_FALSE;
         }
         if (SWITCH_STATUS_SUCCESS != stream_data_init(tech_pvt, session, wsUri, samples_per_second, sampling, channels, 
-                                                        metadata, responseHandler, deflate, heart_beat, suppressLog, rtp_packets, 
+                                                        metadata, sendAsBinary, jsonHead, jsonTail, responseHandler, deflate, heart_beat, suppressLog, rtp_packets,
                                                         extra_headers, tls_cafile, tls_keyfile, tls_certfile, tls_disable_hostname_validation)) {
             destroy_tech_pvt(tech_pvt);
             return SWITCH_STATUS_FALSE;
@@ -859,7 +875,19 @@ extern "C" {
 
         for (auto &chunk : pending_send) {
             if (!chunk.empty()) {
-                streamer->writeBinary(chunk.data(), chunk.size());
+                if (tech_pvt->send_binary_audio) {
+                    streamer->writeBinary(chunk.data(), chunk.size());
+                }
+                else {
+                  std::stringstream ss;
+
+                  ss << tech_pvt->audioJsonHead;
+                  ss << base64_encode(chunk.data(), chunk.size(), false);
+                  ss << tech_pvt->audioJsonTail;
+                  
+                  auto jsonStr = ss.str();
+                  streamer->writeText(jsonStr.c_str());
+                }
             }
         }
 

@@ -8,6 +8,8 @@
 #define MAX_SESSION_ID (256)
 #define MAX_WS_URI (4096)
 #define MAX_METADATA_LEN (8192)
+#define MAX_JSON_HEAD_LEN (256)
+#define MAX_JSON_TAIL_LEN (256)
 
 #define EVENT_CONNECT           "mod_audio_stream::connect"
 #define EVENT_DISCONNECT        "mod_audio_stream::disconnect"
@@ -29,7 +31,10 @@ struct private_data {
     int audio_paused:1;
     int close_requested:1;
     int cleanup_started:1;
+    int send_binary_audio:1;
     char initialMetadata[8192];
+    char audioJsonHead[256];
+    char audioJsonTail[256];
     switch_buffer_t *sbuffer;
     int rtp_packets;
 };

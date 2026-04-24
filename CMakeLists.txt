@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
 project(mod_audio_stream
-        VERSION 1.0.0
+        VERSION 1.1.0
         DESCRIPTION "Audio streaming module for FreeSWITCH."
         HOMEPAGE_URL "https://github.com/amigniter/mod_audio_stream")
 

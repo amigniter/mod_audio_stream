@@ -57,7 +57,10 @@ static switch_status_t start_capture(switch_core_session_t *session,
                                      switch_media_bug_flag_t flags,
                                      char* wsUri,
                                      int sampling,
-                                     char* metadata)
+                                     char* metadata,
+                                     int sendAsBinary,
+                                     char* jsonHead,
+                                     char* jsonTail)
 {
     switch_channel_t *channel = switch_core_session_get_channel(session);
     switch_media_bug_t *bug;
@@ -81,7 +84,7 @@ static switch_status_t start_capture(switch_core_session_t *session,
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "calling stream_session_init.\n");
     if (SWITCH_STATUS_FALSE == stream_session_init(session, responseHandler, read_codec->implementation->actual_samples_per_second,
-                                                 wsUri, sampling, channels, metadata, &pUserData)) {
+                                                 wsUri, sampling, channels, metadata, sendAsBinary, jsonHead, jsonTail, &pUserData)) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing mod_audio_stream session.\n");
         return SWITCH_STATUS_FALSE;
     }
@@ -139,7 +142,7 @@ static switch_status_t send_text(switch_core_session_t *session, char* text) {
 #define STREAM_API_SYNTAX "<uuid> [start | stop | send_text | pause | resume | graceful-shutdown ] [wss-url | path] [mono | mixed | stereo] [8000 | 16000] [metadata]"
 SWITCH_STANDARD_API(stream_function)
 {
-    char *mycmd = NULL, *argv[6] = { 0 };
+    char *mycmd = NULL, *argv[9] = { 0 };
     int argc = 0;
 
     switch_status_t status = SWITCH_STATUS_FALSE;
@@ -188,8 +191,9 @@ SWITCH_STANDARD_API(stream_function)
                 char wsUri[MAX_WS_URI];
                 int sampling = 8000;
                 switch_media_bug_flag_t flags = SMBF_READ_STREAM;
+                int sendAsBinary = 1;
                 char *metadata = argc > 5 ? argv[5] : NULL;
-                if(metadata && (is_valid_utf8(argv[2]) != SWITCH_STATUS_SUCCESS)) {
+                if(metadata && (is_valid_utf8(metadata) != SWITCH_STATUS_SUCCESS)) {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                                       "%s contains invalid utf8 characters\n", argv[2]);
                     switch_core_session_rwunlock(lsession);
@@ -215,6 +219,25 @@ SWITCH_STANDARD_API(stream_function)
                         sampling = atoi(argv[4]);
                     }
                 }
+                if (argc > 6) {
+                  if (0 == strcmp(argv[6], "base64")) {
+                    sendAsBinary = 0;
+                  }
+                }
+                char *jsonHead = (!sendAsBinary && argc > 8) ? argv[7] : NULL;
+                char *jsonTail = (!sendAsBinary && argc > 8) ? argv[8] : NULL;
+                if (jsonHead && (is_valid_utf8(jsonHead) != SWITCH_STATUS_SUCCESS)) {
+                  switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                    "%s contains invalid utf8 characters\n", argv[2]);
+                  switch_core_session_rwunlock(lsession);
+                  goto done;
+                }
+                if (jsonTail && (is_valid_utf8(jsonTail) != SWITCH_STATUS_SUCCESS)) {
+                  switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                    "%s contains invalid utf8 characters\n", argv[2]);
+                  switch_core_session_rwunlock(lsession);
+                  goto done;
+                }
                 if (!validate_ws_uri(argv[2], &wsUri[0])) {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                                       "invalid websocket uri: %s\n", argv[2]);
@@ -222,7 +245,7 @@ SWITCH_STANDARD_API(stream_function)
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                                       "invalid sample rate: %s\n", argv[4]);
                 } else {
-                    status = start_capture(lsession, flags, wsUri, sampling, metadata);
+                    status = start_capture(lsession, flags, wsUri, sampling, metadata, sendAsBinary, jsonHead, jsonTail);
                 }
             } else {
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
