@@ -44,6 +44,15 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
             return stream_frame(bug);
             break;
 
+        case SWITCH_ABC_TYPE_WRITE_REPLACE:
+            // True streaming playback: drain the binary-PCM ring buffer (fed by
+            // the WS binary callback) into the channel's write frame. No temp
+            // file, no ::play event. See stream_playback_frame().
+            if (tech_pvt->close_requested) {
+                return SWITCH_FALSE;
+            }
+            return stream_playback_frame(bug);
+
         case SWITCH_ABC_TYPE_WRITE:
         default:
             break;
@@ -168,6 +177,14 @@ SWITCH_STANDARD_API(stream_function)
                 status = do_pauseresume(lsession, 1);
             } else if (!strcasecmp(argv[1], "resume")) {
                 status = do_pauseresume(lsession, 0);
+            } else if (!strcasecmp(argv[1], "clear")) {
+                switch_channel_t *channel = switch_core_session_get_channel(lsession);
+                switch_media_bug_t *bug = switch_channel_get_private(channel, MY_BUG_NAME);
+                if (bug) {
+                    status = stream_session_clear_playback(lsession);
+                } else {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "mod_audio_stream: no bug for clear\n");
+                }
             } else if (!strcasecmp(argv[1], "send_text")) {
                 if (argc < 3) {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
@@ -205,6 +222,10 @@ SWITCH_STANDARD_API(stream_function)
                     switch_core_session_rwunlock(lsession);
                     goto done;
                 }
+                // Enable the write-replace path so the binary-PCM playback ring
+                // buffer is drained on every 20ms write tick (true streaming
+                // egress — no temp files / no ::play).
+                flags |= SMBF_WRITE_REPLACE;
                 if (argc > 4) {
                     if (0 == strcmp(argv[4], "16k")) {
                         sampling = 16000;

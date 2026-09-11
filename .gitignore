@@ -3,3 +3,11 @@ cmake-build-debug/
 .vscode/
 build/
 _packages
+CMakeCache.txt
+CMakeFiles/
+CPackConfig.cmake
+CPackSourceConfig.cmake
+Makefile
+cmake_install.cmake
+install_manifest.txt
+

@@ -11,6 +11,8 @@ switch_status_t stream_session_pauseresume(switch_core_session_t *session, int p
 switch_status_t stream_session_init(switch_core_session_t *session, responseHandler_t responseHandler,
     uint32_t samples_per_second, char *wsUri, int sampling, int channels, char* metadata, void **ppUserData);
 switch_bool_t stream_frame(switch_media_bug_t *bug);
+switch_bool_t stream_playback_frame(switch_media_bug_t *bug);
 switch_status_t stream_session_cleanup(switch_core_session_t *session, char* text, int channelIsClosing);
+switch_status_t stream_session_clear_playback(switch_core_session_t *session);
 
 #endif //AUDIO_STREAMER_GLUE_H

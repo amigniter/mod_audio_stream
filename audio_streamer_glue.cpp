@@ -1,5 +1,7 @@
 #include <string>
 #include <cstring>
+#include <vector>
+#include <algorithm>
 #include "mod_audio_stream.h"
 //#include <ixwebsocket/IXWebSocket.h>
 #include "WebSocketClient.h"
@@ -77,6 +79,16 @@ public:
             eventCallback(MESSAGE, message.c_str());
         });
 
+        // Binary callback: the server pushes raw L16 PCM frames straight into the
+        // playback ring buffer (true streaming egress — no streamAudio JSON, no temp
+        // file, no ::play event). The WRITE_REPLACE media-bug callback drains this
+        // buffer 20ms at a time and fills the channel's write frame (see
+        // stream_playback_frame). PCM is expected at the bug's `sampling` rate
+        // (desiredSampling, e.g. 16000), 16-bit mono.
+        client.setBinaryCallback([this](const void* data, size_t len) {
+            writePlayback(static_cast<const uint8_t*>(data), len);
+        });
+
         client.setOpenCallback([this]() {
             cJSON *root;
             root = cJSON_CreateObject();
@@ -121,7 +133,16 @@ public:
         });
 
         // Now that our callback is setup, we can start our background thread and receive messages
+        init_playback_buffer();
         client.connect();
+    }
+
+    // (Ring buffer storage is sized in a helper so the constructor body can
+    // populate it without brace-init narrowing.)
+    void init_playback_buffer() {
+        m_playback.assign(PLAYBACK_BUF_BYTES, 0);
+        m_playback_head = 0;
+        m_playback_datalen = 0;
     }
 
     switch_media_bug_t *get_media_bug(switch_core_session_t *session) {
@@ -260,6 +281,11 @@ public:
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - no data in streamAudio\n", m_sessionId.c_str());
             }
         }
+        // streamComplete: backend signals TTS is done; next buffer-drain fires finished immediately.
+        if(jsType && strcmp(jsType, "streamComplete") == 0) {
+            m_stream_ended = true;
+            status = SWITCH_TRUE;
+        }
         cJSON_Delete(json);
         return status;
     }
@@ -293,6 +319,68 @@ public:
         }
     }
 
+    // ---- playback ring buffer (binary PCM egress) ----
+
+    // Push raw PCM bytes received over the WS binary callback into the ring
+    // buffer. Called on the libwsc event thread. If the buffer is full we drop
+    // the oldest data (the bot is behind realtime) so memory stays bounded and
+    // fresh audio is preferred over stale.
+    void writePlayback(const uint8_t* data, size_t len) {
+        if (!data || !len) return;
+        std::lock_guard<std::mutex> lock(m_playback_mutex);
+        for (size_t i = 0; i < len; i++) {
+            size_t pos = (m_playback_head + m_playback_datalen) % m_playback.size();
+            m_playback[pos] = data[i];
+            if (m_playback_datalen < m_playback.size()) {
+                m_playback_datalen++;
+            } else {
+                m_playback_head = (m_playback_head + 1) % m_playback.size();
+            }
+        }
+        m_playback_recv_frames++;
+        m_playback_recv_bytes += len;
+        if (m_playback_recv_frames == 1) {
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,
+                "(%s) writePlayback: FIRST binary PCM frame bytes=%zu buffered=%zu\n",
+                m_sessionId.c_str(), len, m_playback_datalen);
+        } else if (m_playback_recv_frames % 250 == 0) {
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+                "(%s) writePlayback: frames=%llu bytes=%llu buffered=%zu\n",
+                m_sessionId.c_str(), (unsigned long long)m_playback_recv_frames,
+                (unsigned long long)m_playback_recv_bytes, m_playback_datalen);
+        }
+    }
+
+    // Pull up to `len` bytes of PCM out of the ring buffer. Called on the FS
+    // session thread (WRITE_REPLACE media-bug callback). Returns bytes actually
+    // read (0 when the buffer is empty — caller then leaves the write frame
+    // untouched so silence passes through).
+    size_t readPlayback(uint8_t* dst, size_t len) {
+        std::lock_guard<std::mutex> lock(m_playback_mutex);
+        size_t n = std::min(len, m_playback_datalen);
+        for (size_t i = 0; i < n; i++) {
+            dst[i] = m_playback[(m_playback_head + i) % m_playback.size()];
+        }
+        m_playback_head = (m_playback_head + n) % m_playback.size();
+        m_playback_datalen -= n;
+        return n;
+    }
+
+    void clearPlayback() {
+        std::lock_guard<std::mutex> lock(m_playback_mutex);
+        m_playback_head = 0;
+        m_playback_datalen = 0;
+        m_playback_was_playing = false;
+        m_empty_ticks = 0;
+        m_stream_ended = false;
+    }
+
+    // Public so stream_playback_frame (free function) can access it.
+    bool m_playback_was_playing = false;
+    int m_empty_ticks = 0;           // consecutive empty-buffer ticks (debounce)
+    bool m_stream_ended = false;     // backend sent streamComplete (explicit end)
+    static constexpr int PLAYBACK_FINISH_GRACE_TICKS = 100; // ~2s at 20ms/tick
+
 private:
     std::string m_sessionId;
     responseHandler_t m_notify;
@@ -301,6 +389,17 @@ private:
     const char* m_extra_headers;
     int m_playFile;
     std::unordered_set<std::string> m_Files;
+
+    // Ring buffer for incoming binary PCM (L16 @ sampling, mono). 60s of headroom
+    // at 16k/16-bit = 1.92MB; enough for long TTS responses that burst ahead of
+    // real-time playback (CosyVoice returns 10-15s of audio in ~2s).
+    enum { PLAYBACK_BUF_BYTES = 16000 * 2 * 60 };
+    std::mutex m_playback_mutex;
+    std::vector<uint8_t> m_playback;
+    size_t m_playback_head = 0;      // ring read position
+    size_t m_playback_datalen = 0;   // bytes currently buffered
+    unsigned long long m_playback_recv_frames = 0;
+    unsigned long long m_playback_recv_bytes = 0;
 };
 
 
@@ -357,6 +456,30 @@ namespace {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) no resampling needed for this call\n", tech_pvt->sessionId);
         }
 
+        // ---- egress (playback) resampler: binary PCM arrives at `desiredSampling`
+        // (the bug's sampling rate, e.g. 16000) and must be converted to the
+        // channel's write-codec rate before filling the WRITE_REPLACE frame.
+        // desiredSampling -> write_rate. Falls back to desiredSampling if the
+        // write codec isn't available yet.
+        {
+            switch_codec_t *write_codec = switch_core_session_get_write_codec(session);
+            int write_rate = (write_codec && write_codec->implementation) ?
+                (int)write_codec->implementation->actual_samples_per_second : desiredSampling;
+            tech_pvt->write_rate = write_rate;
+            if (desiredSampling != write_rate) {
+                tech_pvt->egress_resampler = speex_resampler_init(channels, desiredSampling, write_rate, SWITCH_RESAMPLE_QUALITY, &err);
+                if (0 != err) {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                        "(%s) Error initializing egress resampler (%u->%d): %s.\n",
+                        tech_pvt->sessionId, desiredSampling, write_rate, speex_resampler_strerror(err));
+                    return SWITCH_STATUS_FALSE;
+                }
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                    "(%s) egress resampler %u->%d\n", tech_pvt->sessionId, desiredSampling, write_rate);
+            }
+            tech_pvt->egress_enabled = 1;
+        }
+
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) stream_data_init\n", tech_pvt->sessionId);
 
         return SWITCH_STATUS_SUCCESS;
@@ -367,6 +490,10 @@ namespace {
         if (tech_pvt->resampler) {
             speex_resampler_destroy(tech_pvt->resampler);
             tech_pvt->resampler = nullptr;
+        }
+        if (tech_pvt->egress_resampler) {
+            speex_resampler_destroy(tech_pvt->egress_resampler);
+            tech_pvt->egress_resampler = nullptr;
         }
         if (tech_pvt->mutex) {
             switch_mutex_destroy(tech_pvt->mutex);
@@ -501,6 +628,20 @@ extern "C" {
 
         switch_core_media_bug_flush(bug);
         tech_pvt->audio_paused = pause;
+        return SWITCH_STATUS_SUCCESS;
+    }
+
+    switch_status_t stream_session_clear_playback(switch_core_session_t *session) {
+        switch_channel_t *channel = switch_core_session_get_channel(session);
+        auto *bug = (switch_media_bug_t*) switch_channel_get_private(channel, MY_BUG_NAME);
+        if (!bug) {
+            return SWITCH_STATUS_FALSE;
+        }
+        auto *tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
+        if (!tech_pvt) return SWITCH_STATUS_FALSE;
+        auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
+        if (pAudioStreamer) pAudioStreamer->clearPlayback();
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "stream_session_clear_playback: buffer cleared\n");
         return SWITCH_STATUS_SUCCESS;
     }
 
@@ -698,6 +839,109 @@ extern "C" {
             switch_mutex_unlock(tech_pvt->mutex);
         }
 
+        return SWITCH_TRUE;
+    }
+
+    // ---- true streaming playback (binary PCM egress) ----
+    //
+    // Called from the media-bug WRITE_REPLACE callback (capture_function in
+    // mod_audio_stream.c). It drains the AudioStreamer playback ring buffer
+    // (fed by the WS binary callback) one 20ms frame at a time and fills the
+    // channel's write-replace frame with the PCM. No streamAudio JSON, no temp
+    // file, no ::play event, no switch_core_media_bug_write — the raw L16 PCM
+    // pushed in over the WebSocket goes straight to FreeSWITCH's audio output.
+    //
+    // If the buffer is empty (nothing to play) the frame is left untouched so the
+    // channel's normal (silent, for a parked channel) audio passes through.
+    switch_bool_t stream_playback_frame(switch_media_bug_t *bug) {
+        auto *tech_pvt = (private_t *) switch_core_media_bug_get_user_data(bug);
+        if (!tech_pvt || !tech_pvt->egress_enabled || tech_pvt->audio_paused || tech_pvt->close_requested) {
+            return SWITCH_TRUE;
+        }
+        auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
+        if (!pAudioStreamer) return SWITCH_TRUE;
+
+        // (diagnostic) confirm WRITE_REPLACE fires and show buffer fill.
+        tech_pvt->playback_ticks++;
+        if (tech_pvt->playback_ticks == 1) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(switch_core_media_bug_get_session(bug)),
+                SWITCH_LOG_NOTICE, "(%s) stream_playback_frame: FIRST WRITE_REPLACE tick\n", tech_pvt->sessionId);
+        } else if (tech_pvt->playback_ticks == 1000 || tech_pvt->playback_ticks == 2000) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(switch_core_media_bug_get_session(bug)),
+                SWITCH_LOG_DEBUG, "(%s) stream_playback_frame: tick=%llu\n", tech_pvt->sessionId, (unsigned long long)tech_pvt->playback_ticks);
+        }
+
+        switch_frame_t *rframe = switch_core_media_bug_get_write_replace_frame(bug);
+        if (!rframe || !rframe->data || !rframe->buflen) return SWITCH_TRUE;
+
+        int channels = tech_pvt->channels ? tech_pvt->channels : 1;
+        int in_rate = tech_pvt->sampling;   // PCM rate in the ring buffer (desiredSampling, e.g. 16000)
+        int out_rate = tech_pvt->write_rate ? tech_pvt->write_rate : (int) rframe->rate;
+
+        // One 20ms frame's worth of samples at each rate.
+        size_t in_samples = (size_t)(in_rate / 50);
+        size_t out_samples = (size_t)(out_rate / 50);
+        size_t in_bytes = in_samples * channels * sizeof(int16_t);
+        size_t out_bytes = out_samples * channels * sizeof(int16_t);
+        if (out_bytes > rframe->buflen) out_bytes = rframe->buflen;
+
+        uint8_t inbuf[SWITCH_RECOMMENDED_BUFFER_SIZE];
+        if (in_bytes > sizeof(inbuf)) in_bytes = sizeof(inbuf);
+
+        size_t got = pAudioStreamer->readPlayback(inbuf, in_bytes);
+        if (got == 0) {
+            // Buffer empty. Don't immediately fire "playback finished" — TTS streams in
+            // bursts with gaps; the buffer legitimately drains between bursts. Use a debounce:
+            // only fire after the buffer has been continuously empty for a grace period,
+            // OR if the backend has sent an explicit streamComplete signal.
+            if (pAudioStreamer->m_playback_was_playing) {
+                pAudioStreamer->m_empty_ticks++;
+                bool stream_ended = pAudioStreamer->m_stream_ended;
+                int grace = pAudioStreamer->PLAYBACK_FINISH_GRACE_TICKS;
+                if (stream_ended || pAudioStreamer->m_empty_ticks >= grace) {
+                    pAudioStreamer->m_playback_was_playing = false;
+                    pAudioStreamer->m_empty_ticks = 0;
+                    pAudioStreamer->m_stream_ended = false;
+                    const char *fin_msg = "{\"type\":\"playback_finished\"}";
+                    pAudioStreamer->writeText(fin_msg);
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(switch_core_media_bug_get_session(bug)),
+                        SWITCH_LOG_NOTICE, "(%s) stream_playback_frame: playback finished (%s)\n",
+                        tech_pvt->sessionId, stream_ended ? "streamComplete" : "buffer drained");
+                }
+            }
+            return SWITCH_TRUE;
+        }
+        // We have audio — mark as playing and reset the empty-tick debounce counter.
+        pAudioStreamer->m_playback_was_playing = true;
+        pAudioStreamer->m_empty_ticks = 0;
+        // Pad a short read with silence so the resampler stays clocked at 20ms.
+        if (got < in_bytes) {
+            memset(inbuf + got, 0, in_bytes - got);
+        }
+
+        if (tech_pvt->egress_resampler) {
+            spx_uint32_t in_len = (spx_uint32_t)(in_bytes / (channels * sizeof(int16_t)));
+            spx_uint32_t out_len = (spx_uint32_t)(out_bytes / (channels * sizeof(int16_t)));
+            if (channels == 1) {
+                speex_resampler_process_int(tech_pvt->egress_resampler, 0,
+                    (const spx_int16_t *) inbuf, &in_len,
+                    (spx_int16_t *) rframe->data, &out_len);
+            } else {
+                speex_resampler_process_interleaved_int(tech_pvt->egress_resampler,
+                    (const spx_int16_t *) inbuf, &in_len,
+                    (spx_int16_t *) rframe->data, &out_len);
+            }
+            rframe->datalen = (uint32_t)(out_len * channels * sizeof(int16_t));
+            rframe->samples = (uint32_t)out_len;
+        } else {
+            // No resampling needed (rates equal) — copy straight through.
+            size_t n = std::min(in_bytes, out_bytes);
+            memcpy(rframe->data, inbuf, n);
+            rframe->datalen = (uint32_t)n;
+            rframe->samples = (uint32_t)(n / (channels * sizeof(int16_t)));
+        }
+        rframe->rate = (uint32_t)out_rate;
+        rframe->channels = (uint32_t)channels;
         return SWITCH_TRUE;
     }
 

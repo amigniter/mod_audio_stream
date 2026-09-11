@@ -31,6 +31,11 @@ struct private_data {
     char initialMetadata[8192];
     switch_buffer_t *sbuffer;
     int rtp_packets;
+    /* ---- true streaming playback (binary PCM egress) ---- */
+    int write_rate;                          /* channel write codec rate (egress target) */
+    SpeexResamplerState *egress_resampler;   /* desiredSampling(sampling) -> write_rate */
+    int egress_enabled;                      /* 1 once binary playback is wired */
+    unsigned long long playback_ticks;      /* (diag) WRITE_REPLACE callback count */
 };
 
 typedef struct private_data private_t;
