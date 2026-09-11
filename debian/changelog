@@ -1,3 +1,14 @@
+mod-audio-stream (1.0.0-4) UNRELEASED; urgency=medium
+
+  * Add synchronized per-session stream lifecycle state management.
+  * Prevent concurrent start and cleanup race conditions.
+  * Improve media bug failure and channel hangup cleanup.
+  * Ensure initial metadata precedes streamed audio frames.
+  * Fix initial metadata argument validation.
+  * Update libwsc with WebSocket protocol, security and lifecycle hardening.
+
+ -- Milan M. <amsoftswitch@gmail.com>  Fri, 11 Sep 2026 19:33:35 +0200
+
 mod-audio-stream (1.0.0-3) UNRELEASED; urgency=medium
 
   * Added std::shared_ptr/std::weak_ptr for proper lifetime management.

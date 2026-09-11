@@ -115,12 +115,7 @@ static switch_status_t start_capture(switch_core_session_t *session,
 
     void *pUserData = NULL;
     int channels = (flags & SMBF_STEREO) ? 2 : 1;
-    /*
-    if (switch_channel_get_private(channel, MY_BUG_NAME)) {
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "mod_audio_stream: bug already attached!\n");
-        return SWITCH_STATUS_FALSE;
-    }
-    */
+
     if (switch_channel_pre_answer(channel) != SWITCH_STATUS_SUCCESS) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "mod_audio_stream: channel must have reached pre-answer status before calling start!\n");
         return SWITCH_STATUS_FALSE;
@@ -161,7 +156,6 @@ static switch_status_t start_capture(switch_core_session_t *session,
         return status;
     }
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "setting bug private data.\n");
-    //switch_channel_set_private(channel, MY_BUG_NAME, bug);
     switch_mutex_lock(ctx->mutex);
     ctx->bug = bug;
     ctx->state = STREAM_STATE_ACTIVE;

@@ -18,12 +18,12 @@ class AudioStreamer {
 public:
     // Factory
     static std::shared_ptr<AudioStreamer> create(
-        const char* uuid, const char* wsUri, responseHandler_t callback, int deflate, int heart_beat,
+        const char* uuid, const char* wsUri, const char* metadata, responseHandler_t callback, int deflate, int heart_beat,
         bool suppressLog, const char* extra_headers, const char* tls_cafile, const char* tls_keyfile, 
         const char* tls_certfile, bool tls_disable_hostname_validation) {
 
         std::shared_ptr<AudioStreamer> sp(new AudioStreamer(
-            uuid, wsUri, callback, deflate, heart_beat,
+            uuid, wsUri, metadata, callback, deflate, heart_beat,
             suppressLog, extra_headers, tls_cafile, tls_keyfile, 
             tls_certfile, tls_disable_hostname_validation
         ));
@@ -47,6 +47,7 @@ public:
     }
 
     void writeBinary(uint8_t* buffer, size_t len) {
+        if(!m_readyForAudio.load(std::memory_order_acquire)) return;
         if(!this->isConnected()) return;
         client.sendBinary(buffer, len);
     }
@@ -75,6 +76,7 @@ public:
     }
 
     void markCleanedUp() {
+        m_readyForAudio.store(false, std::memory_order_release);
         m_cleanedUp.store(true, std::memory_order_release);
         client.setMessageCallback({});
         client.setOpenCallback({});
@@ -89,10 +91,10 @@ public:
 private:
     // Ctor
     AudioStreamer(
-        const char* uuid, const char* wsUri, responseHandler_t callback, int deflate, int heart_beat,
+        const char* uuid, const char* wsUri, const char* metadata, responseHandler_t callback, int deflate, int heart_beat,
         bool suppressLog, const char* extra_headers, const char* tls_cafile, const char* tls_keyfile, 
         const char* tls_certfile, bool tls_disable_hostname_validation
-    ) : m_sessionId(uuid), m_notify(callback), m_suppress_log(suppressLog), 
+    ) : m_sessionId(uuid), m_initialMetadata(metadata ? metadata : ""), m_notify(callback), m_suppress_log(suppressLog),
         m_extra_headers(extra_headers), m_playFile(0) {
 
         WebSocketHeaders hdrs;
@@ -242,15 +244,16 @@ private:
         }
     }
 
-    inline void send_initial_metadata(switch_core_session_t *session) {
-        auto *bug = get_media_bug(session);
-        if(bug) {
-            auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
-            if(tech_pvt && strlen(tech_pvt->initialMetadata) > 0) {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                                          "sending initial metadata %s\n", tech_pvt->initialMetadata);
-                writeText(tech_pvt->initialMetadata);
-            }
+    inline void send_initial_metadata() {
+        if (!m_initialMetadata.empty()) {
+            switch_log_printf(
+                SWITCH_CHANNEL_LOG,
+                SWITCH_LOG_DEBUG,
+                "sending initial metadata %s\n",
+                m_initialMetadata.c_str()
+            );
+
+            writeText(m_initialMetadata.c_str());
         }
     }
 
@@ -277,7 +280,8 @@ private:
 
         switch (event) {
             case CONNECT_SUCCESS:
-                send_initial_metadata(psession);
+                send_initial_metadata();
+                m_readyForAudio.store(true, std::memory_order_release);
                 m_notify(psession, EVENT_CONNECT, msg.c_str());
                 break;
 
@@ -433,6 +437,7 @@ private:
 
 private:
     std::string m_sessionId;
+    std::string m_initialMetadata;
     responseHandler_t m_notify;
     WebSocketClient client;
     bool m_suppress_log;
@@ -441,6 +446,7 @@ private:
     std::unordered_set<std::string> m_Files;
     std::atomic<bool> m_cleanedUp{false};
     std::mutex m_stateMutex;
+    std::atomic<bool> m_readyForAudio{false};
 };
 
 
@@ -466,12 +472,10 @@ namespace {
         tech_pvt->channels = channels;
         tech_pvt->audio_paused = 0;
 
-        if (metadata) strncpy(tech_pvt->initialMetadata, metadata, MAX_METADATA_LEN);
-
         //size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PERIOD * BUFFERED_SEC);
         const size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * rtp_packets);
         
-        auto sp = AudioStreamer::create(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat,
+        auto sp = AudioStreamer::create(tech_pvt->sessionId, wsUri, metadata, responseHandler, deflate, heart_beat,
                                         suppressLog, extra_headers, tls_cafile, tls_keyfile,
                                         tls_certfile, tls_disable_hostname_validation);
 
@@ -899,7 +903,6 @@ extern "C" {
 
     switch_status_t stream_session_cleanup(switch_core_session_t *session, char* text, int channelIsClosing) {
         switch_channel_t *channel = switch_core_session_get_channel(session);
-        //auto *bug = (switch_media_bug_t*) switch_channel_get_private(channel, MY_BUG_NAME);
         auto *ctx = (stream_context_t*)switch_channel_get_private(channel, MY_STREAM_CONTEXT);
         if (!ctx) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "stream_session_cleanup: no context - websocket connection already closed\n");
@@ -929,11 +932,10 @@ extern "C" {
                 switch_mutex_unlock(tech_pvt->mutex);
                 return SWITCH_STATUS_SUCCESS;
             }
+
             tech_pvt->cleanup_started = 1;
 
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) stream_session_cleanup\n", sessionId);
-
-            //switch_channel_set_private(channel, MY_BUG_NAME, nullptr);
 
             sp_wrap = static_cast<std::shared_ptr<AudioStreamer>*>(tech_pvt->pAudioStreamer);
             tech_pvt->pAudioStreamer = nullptr;
