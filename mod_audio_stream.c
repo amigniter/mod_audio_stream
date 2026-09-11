@@ -10,6 +10,54 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load);
 
 SWITCH_MODULE_DEFINITION(mod_audio_stream, mod_audio_stream_load, mod_audio_stream_shutdown, NULL /*mod_audio_stream_runtime*/);
 
+/* Protects only the first get-or-create of a per-session stream context. */
+static switch_mutex_t *stream_context_mutex = NULL;
+
+static const char *stream_state_name(stream_state_t state)
+{
+    switch (state) {
+        case STREAM_STATE_IDLE: return "IDLE";
+        case STREAM_STATE_STARTING: return "STARTING";
+        case STREAM_STATE_ACTIVE: return "ACTIVE";
+        case STREAM_STATE_PAUSED: return "PAUSED";
+        case STREAM_STATE_STOPPING: return "STOPPING";
+        default: return "UNKNOWN";
+    }
+}
+
+static stream_context_t *get_or_create_stream_context(switch_core_session_t *session)
+{
+    switch_channel_t *channel = switch_core_session_get_channel(session);
+    stream_context_t *ctx;
+
+    switch_mutex_lock(stream_context_mutex);
+    ctx = (stream_context_t *)switch_channel_get_private(channel, MY_STREAM_CONTEXT);
+    if (!ctx) {
+        ctx = (stream_context_t *)switch_core_session_alloc(session, sizeof(*ctx));
+        if (ctx) {
+            memset(ctx, 0, sizeof(*ctx));
+            if (switch_mutex_init(&ctx->mutex, SWITCH_MUTEX_NESTED,
+                                  switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
+                ctx = NULL;
+            } else {
+                ctx->state = STREAM_STATE_IDLE;
+                switch_channel_set_private(channel, MY_STREAM_CONTEXT, ctx);
+            }
+        }
+    }
+    switch_mutex_unlock(stream_context_mutex);
+
+    return ctx;
+}
+
+static void reset_failed_start(stream_context_t *ctx)
+{
+    switch_mutex_lock(ctx->mutex);
+    ctx->bug = NULL;
+    ctx->state = STREAM_STATE_IDLE;
+    switch_mutex_unlock(ctx->mutex);
+}
+
 static void responseHandler(switch_core_session_t* session, const char* eventName, const char* json) {
     switch_event_t *event;
     switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -63,15 +111,16 @@ static switch_status_t start_capture(switch_core_session_t *session,
     switch_media_bug_t *bug;
     switch_status_t status;
     switch_codec_t* read_codec;
+    stream_context_t *ctx;
 
     void *pUserData = NULL;
     int channels = (flags & SMBF_STEREO) ? 2 : 1;
-
+    /*
     if (switch_channel_get_private(channel, MY_BUG_NAME)) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "mod_audio_stream: bug already attached!\n");
         return SWITCH_STATUS_FALSE;
     }
-
+    */
     if (switch_channel_pre_answer(channel) != SWITCH_STATUS_SUCCESS) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "mod_audio_stream: channel must have reached pre-answer status before calling start!\n");
         return SWITCH_STATUS_FALSE;
@@ -79,18 +128,44 @@ static switch_status_t start_capture(switch_core_session_t *session,
 
     read_codec = switch_core_session_get_read_codec(session);
 
+    ctx = get_or_create_stream_context(session);
+    if (!ctx) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                          "mod_audio_stream: failed to create stream context\n");
+        return SWITCH_STATUS_FALSE;
+    }
+
+    switch_mutex_lock(ctx->mutex);
+    if (ctx->state != STREAM_STATE_IDLE) {
+        stream_state_t state = ctx->state;
+        switch_mutex_unlock(ctx->mutex);
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                          "mod_audio_stream: cannot start while stream state is %s\n",
+                          stream_state_name(state));
+        return SWITCH_STATUS_FALSE;
+    }
+    ctx->state = STREAM_STATE_STARTING;
+    switch_mutex_unlock(ctx->mutex);
+
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "calling stream_session_init.\n");
     if (SWITCH_STATUS_FALSE == stream_session_init(session, responseHandler, read_codec->implementation->actual_samples_per_second,
                                                  wsUri, sampling, channels, metadata, &pUserData)) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing mod_audio_stream session.\n");
+        reset_failed_start(ctx);
         return SWITCH_STATUS_FALSE;
     }
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "adding bug.\n");
     if ((status = switch_core_media_bug_add(session, MY_BUG_NAME, NULL, capture_callback, pUserData, 0, flags, &bug)) != SWITCH_STATUS_SUCCESS) {
+        stream_session_discard(pUserData);
+        reset_failed_start(ctx);
         return status;
     }
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "setting bug private data.\n");
-    switch_channel_set_private(channel, MY_BUG_NAME, bug);
+    //switch_channel_set_private(channel, MY_BUG_NAME, bug);
+    switch_mutex_lock(ctx->mutex);
+    ctx->bug = bug;
+    ctx->state = STREAM_STATE_ACTIVE;
+    switch_mutex_unlock(ctx->mutex);
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "exiting start_capture.\n");
     return SWITCH_STATUS_SUCCESS;
@@ -122,18 +197,14 @@ static switch_status_t do_pauseresume(switch_core_session_t *session, int pause)
 }
 
 static switch_status_t send_text(switch_core_session_t *session, char* text) {
-    switch_status_t status = SWITCH_STATUS_FALSE;
-    switch_channel_t *channel = switch_core_session_get_channel(session);
-    switch_media_bug_t *bug = switch_channel_get_private(channel, MY_BUG_NAME);
+    switch_log_printf(
+        SWITCH_CHANNEL_SESSION_LOG(session),
+        SWITCH_LOG_INFO,
+        "mod_audio_stream: sending text: %s.\n",
+        text
+    );
 
-    if (bug) {
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "mod_audio_stream: sending text: %s.\n", text);
-        status = stream_session_send_text(session, text);
-    }
-    else {
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "mod_audio_stream: no bug, failed sending text: %s.\n", text);
-    }
-    return status;
+    return stream_session_send_text(session, text);
 }
 
 #define STREAM_API_SYNTAX "<uuid> [start | stop | send_text | pause | resume | graceful-shutdown ] [wss-url | path] [mono | mixed | stereo] [8000 | 16000] [metadata]"
@@ -189,9 +260,9 @@ SWITCH_STANDARD_API(stream_function)
                 int sampling = 8000;
                 switch_media_bug_flag_t flags = SMBF_READ_STREAM;
                 char *metadata = argc > 5 ? argv[5] : NULL;
-                if(metadata && (is_valid_utf8(argv[2]) != SWITCH_STATUS_SUCCESS)) {
+                if(metadata && (is_valid_utf8(metadata) != SWITCH_STATUS_SUCCESS)) {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                                      "%s contains invalid utf8 characters\n", argv[2]);
+                                      "%s contains invalid utf8 characters\n", metadata);
                     switch_core_session_rwunlock(lsession);
                     goto done;
                 }
@@ -254,6 +325,12 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
 
     /* connect my internal structure to the blank pointer passed to me */
     *module_interface = switch_loadable_module_create_module_interface(pool, modname);
+
+    if (switch_mutex_init(&stream_context_mutex, SWITCH_MUTEX_NESTED, pool) != SWITCH_STATUS_SUCCESS) {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+                          "Could not initialize mod_audio_stream context mutex.\n");
+        return SWITCH_STATUS_TERM;
+    }
 
     /* create/register custom event message types */
     if (switch_event_reserve_subclass(EVENT_JSON) != SWITCH_STATUS_SUCCESS ||

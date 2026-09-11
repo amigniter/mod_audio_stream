@@ -5,6 +5,7 @@
 #include <speex/speex_resampler.h>
 
 #define MY_BUG_NAME "audio_stream"
+#define MY_STREAM_CONTEXT "audio_stream_context"
 #define MAX_SESSION_ID (256)
 #define MAX_WS_URI (4096)
 #define MAX_METADATA_LEN (8192)
@@ -35,6 +36,20 @@ struct private_data {
 };
 
 typedef struct private_data private_t;
+
+typedef enum {
+    STREAM_STATE_IDLE = 0,
+    STREAM_STATE_STARTING,
+    STREAM_STATE_ACTIVE,
+    STREAM_STATE_PAUSED,
+    STREAM_STATE_STOPPING
+} stream_state_t;
+
+typedef struct stream_context {
+    switch_mutex_t *mutex;
+    stream_state_t state;
+    switch_media_bug_t *bug;
+} stream_context_t;
 
 enum notifyEvent_t {
     CONNECT_SUCCESS,

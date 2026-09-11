@@ -225,7 +225,11 @@ private:
         if(!channel) {
             return nullptr;
         }
-        auto *bug = (switch_media_bug_t *) switch_channel_get_private(channel, MY_BUG_NAME);
+        auto *ctx = (stream_context_t *)switch_channel_get_private(channel, MY_STREAM_CONTEXT);
+        if (!ctx) return nullptr;
+        switch_mutex_lock(ctx->mutex);
+        auto *bug = ctx->bug;
+        switch_mutex_unlock(ctx->mutex);
         return bug;
     }
 
@@ -594,14 +598,25 @@ extern "C" {
 
     switch_status_t stream_session_send_text(switch_core_session_t *session, char* text) {
         switch_channel_t *channel = switch_core_session_get_channel(session);
-        auto *bug = (switch_media_bug_t*) switch_channel_get_private(channel, MY_BUG_NAME);
-        if (!bug) {
+        auto *ctx = (stream_context_t*)switch_channel_get_private(channel, MY_STREAM_CONTEXT);
+        if (!ctx) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "stream_session_send_text failed because no bug\n");
+            return SWITCH_STATUS_FALSE;
+        }
+
+        switch_mutex_lock(ctx->mutex);
+        auto *bug = ctx->bug;
+        if (!bug || (ctx->state != STREAM_STATE_ACTIVE && ctx->state != STREAM_STATE_PAUSED)) {
+            switch_mutex_unlock(ctx->mutex);
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "stream_session_send_text failed because stream is not active\n");
             return SWITCH_STATUS_FALSE;
         }
         auto *tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
 
-        if (!tech_pvt) return SWITCH_STATUS_FALSE;
+        if (!tech_pvt) {
+            switch_mutex_unlock(ctx->mutex);
+            return SWITCH_STATUS_FALSE;
+        }
 
         std::shared_ptr<AudioStreamer> streamer;
 
@@ -615,6 +630,7 @@ extern "C" {
         }
 
         switch_mutex_unlock(tech_pvt->mutex);
+        switch_mutex_unlock(ctx->mutex);
 
         if (streamer) {
             streamer->writeText(text);
@@ -626,17 +642,32 @@ extern "C" {
 
     switch_status_t stream_session_pauseresume(switch_core_session_t *session, int pause) {
         switch_channel_t *channel = switch_core_session_get_channel(session);
-        auto *bug = (switch_media_bug_t*) switch_channel_get_private(channel, MY_BUG_NAME);
-        if (!bug) {
+        auto *ctx = (stream_context_t*)switch_channel_get_private(channel, MY_STREAM_CONTEXT);
+        if (!ctx) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "stream_session_pauseresume failed because no bug\n");
             return SWITCH_STATUS_FALSE;
         }
+
+        switch_mutex_lock(ctx->mutex);
+        const stream_state_t expected = pause ? STREAM_STATE_ACTIVE : STREAM_STATE_PAUSED;
+        if (!ctx->bug || ctx->state != expected) {
+            switch_mutex_unlock(ctx->mutex);
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                              "stream_session_pauseresume failed because stream state is invalid\n");
+            return SWITCH_STATUS_FALSE;
+        }
+        auto *bug = ctx->bug;
         auto *tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
 
-        if (!tech_pvt) return SWITCH_STATUS_FALSE;
+        if (!tech_pvt) {
+            switch_mutex_unlock(ctx->mutex);
+            return SWITCH_STATUS_FALSE;
+        }
 
         switch_core_media_bug_flush(bug);
         tech_pvt->audio_paused = pause;
+        ctx->state = pause ? STREAM_STATE_PAUSED : STREAM_STATE_ACTIVE;
+        switch_mutex_unlock(ctx->mutex);
         return SWITCH_STATUS_SUCCESS;
     }
 
@@ -868,7 +899,21 @@ extern "C" {
 
     switch_status_t stream_session_cleanup(switch_core_session_t *session, char* text, int channelIsClosing) {
         switch_channel_t *channel = switch_core_session_get_channel(session);
-        auto *bug = (switch_media_bug_t*) switch_channel_get_private(channel, MY_BUG_NAME);
+        //auto *bug = (switch_media_bug_t*) switch_channel_get_private(channel, MY_BUG_NAME);
+        auto *ctx = (stream_context_t*)switch_channel_get_private(channel, MY_STREAM_CONTEXT);
+        if (!ctx) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "stream_session_cleanup: no context - websocket connection already closed\n");
+            return SWITCH_STATUS_FALSE;
+        }
+
+        switch_mutex_lock(ctx->mutex);
+        auto *bug = ctx->bug;
+        if (bug) {
+            ctx->state = STREAM_STATE_STOPPING;
+            ctx->bug = nullptr;
+        }
+        switch_mutex_unlock(ctx->mutex);
+
         if(bug)
         {
             auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
@@ -888,7 +933,7 @@ extern "C" {
 
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) stream_session_cleanup\n", sessionId);
 
-            switch_channel_set_private(channel, MY_BUG_NAME, nullptr);
+            //switch_channel_set_private(channel, MY_BUG_NAME, nullptr);
 
             sp_wrap = static_cast<std::shared_ptr<AudioStreamer>*>(tech_pvt->pAudioStreamer);
             tech_pvt->pAudioStreamer = nullptr;
@@ -918,11 +963,41 @@ extern "C" {
 
             destroy_tech_pvt(tech_pvt);
 
+            if (!channelIsClosing) {
+                switch_mutex_lock(ctx->mutex);
+                ctx->state = STREAM_STATE_IDLE;
+                switch_mutex_unlock(ctx->mutex);
+            }
+
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "(%s) stream_session_cleanup: connection closed\n", sessionId);
             return SWITCH_STATUS_SUCCESS;
         }
 
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "stream_session_cleanup: no bug - websocket connection already closed\n");
         return SWITCH_STATUS_FALSE;
+    }
+
+    void stream_session_discard(void *userData) {
+        auto *tech_pvt = static_cast<private_t*>(userData);
+        if (!tech_pvt) return;
+
+        std::shared_ptr<AudioStreamer>* sp_wrap = nullptr;
+        std::shared_ptr<AudioStreamer> streamer;
+
+        switch_mutex_lock(tech_pvt->mutex);
+        if (!tech_pvt->cleanup_started) {
+            tech_pvt->cleanup_started = 1;
+            sp_wrap = static_cast<std::shared_ptr<AudioStreamer>*>(tech_pvt->pAudioStreamer);
+            tech_pvt->pAudioStreamer = nullptr;
+            if (sp_wrap && *sp_wrap) streamer = *sp_wrap;
+        }
+        switch_mutex_unlock(tech_pvt->mutex);
+
+        if (sp_wrap) delete sp_wrap;
+        if (streamer) {
+            streamer->markCleanedUp();
+            streamer->disconnect();
+        }
+        destroy_tech_pvt(tech_pvt);
     }
 }

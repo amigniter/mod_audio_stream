@@ -10,5 +10,6 @@ switch_status_t stream_session_init(switch_core_session_t *session, responseHand
     uint32_t samples_per_second, char *wsUri, int sampling, int channels, char* metadata, void **ppUserData);
 switch_bool_t stream_frame(switch_media_bug_t *bug);
 switch_status_t stream_session_cleanup(switch_core_session_t *session, char* text, int channelIsClosing);
+void stream_session_discard(void *userData);
 
 #endif //AUDIO_STREAMER_GLUE_H
