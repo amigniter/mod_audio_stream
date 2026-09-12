@@ -48,6 +48,7 @@ typedef struct stream_context {
     switch_mutex_t *mutex;
     stream_state_t state;
     switch_media_bug_t *bug;
+    int startup_failed;
 } stream_context_t;
 
 enum notifyEvent_t {

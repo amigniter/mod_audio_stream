@@ -243,6 +243,12 @@ private:
 
         switch_mutex_lock(ctx->mutex);
 
+        if (ctx->state == STREAM_STATE_STARTING && !ctx->bug) {
+            ctx->startup_failed = 1;
+            switch_mutex_unlock(ctx->mutex);
+            return;
+        }
+
         if (ctx->bug &&
             (ctx->state == STREAM_STATE_ACTIVE ||
             ctx->state == STREAM_STATE_PAUSED)) {

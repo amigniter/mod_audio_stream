@@ -55,6 +55,7 @@ static void reset_failed_start(stream_context_t *ctx)
     switch_mutex_lock(ctx->mutex);
     ctx->bug = NULL;
     ctx->state = STREAM_STATE_IDLE;
+    ctx->startup_failed = 0;
     switch_mutex_unlock(ctx->mutex);
 }
 
@@ -139,7 +140,9 @@ static switch_status_t start_capture(switch_core_session_t *session,
                           stream_state_name(state));
         return SWITCH_STATUS_FALSE;
     }
+    ctx->bug = NULL;
     ctx->state = STREAM_STATE_STARTING;
+    ctx->startup_failed = 0;
     switch_mutex_unlock(ctx->mutex);
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "calling stream_session_init.\n");
@@ -149,17 +152,35 @@ static switch_status_t start_capture(switch_core_session_t *session,
         reset_failed_start(ctx);
         return SWITCH_STATUS_FALSE;
     }
+
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "adding bug.\n");
     if ((status = switch_core_media_bug_add(session, MY_BUG_NAME, NULL, capture_callback, pUserData, 0, flags, &bug)) != SWITCH_STATUS_SUCCESS) {
         stream_session_discard(pUserData);
         reset_failed_start(ctx);
         return status;
     }
+
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "setting bug private data.\n");
+
+    int startup_failed = 0;
+
     switch_mutex_lock(ctx->mutex);
     ctx->bug = bug;
     ctx->state = STREAM_STATE_ACTIVE;
+    if (ctx->startup_failed) {
+        startup_failed = 1;
+    }
     switch_mutex_unlock(ctx->mutex);
+
+    if (startup_failed) {
+        switch_log_printf(
+            SWITCH_CHANNEL_SESSION_LOG(session),
+            SWITCH_LOG_WARNING,
+            "WebSocket connection failed during stream startup.\n"
+        );
+        switch_core_media_bug_close(&bug, SWITCH_FALSE);
+        return SWITCH_STATUS_FALSE;
+    }
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "exiting start_capture.\n");
     return SWITCH_STATUS_SUCCESS;
