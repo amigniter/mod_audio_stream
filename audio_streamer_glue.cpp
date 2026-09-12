@@ -222,24 +222,44 @@ private:
         });
     }
 
-    switch_media_bug_t *get_media_bug(switch_core_session_t *session) {
+    inline void media_bug_close(switch_core_session_t *session)
+    {
         switch_channel_t *channel = switch_core_session_get_channel(session);
-        if(!channel) {
-            return nullptr;
+        if (!channel) {
+            return;
         }
-        auto *ctx = (stream_context_t *)switch_channel_get_private(channel, MY_STREAM_CONTEXT);
-        if (!ctx) return nullptr;
-        switch_mutex_lock(ctx->mutex);
-        auto *bug = ctx->bug;
-        switch_mutex_unlock(ctx->mutex);
-        return bug;
-    }
 
-    inline void media_bug_close(switch_core_session_t *session) {
-        auto *bug = get_media_bug(session);
-        if(bug) {
-            auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
-            tech_pvt->close_requested = 1;
+        auto *ctx =
+            (stream_context_t *)switch_channel_get_private(
+                channel,
+                MY_STREAM_CONTEXT
+            );
+
+        if (!ctx) {
+            return;
+        }
+
+        switch_media_bug_t *bug = nullptr;
+
+        switch_mutex_lock(ctx->mutex);
+
+        if (ctx->bug &&
+            (ctx->state == STREAM_STATE_ACTIVE ||
+            ctx->state == STREAM_STATE_PAUSED)) {
+
+            bug = ctx->bug;
+
+            auto *tech_pvt =
+                (private_t *)switch_core_media_bug_get_user_data(bug);
+
+            if (tech_pvt) {
+                tech_pvt->close_requested = 1;
+            }
+        }
+
+        switch_mutex_unlock(ctx->mutex);
+
+        if (bug) {
             switch_core_media_bug_close(&bug, SWITCH_FALSE);
         }
     }
@@ -288,6 +308,7 @@ private:
             case CONNECTION_DROPPED:
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO, "connection closed\n");
                 m_notify(psession, EVENT_DISCONNECT, msg.c_str());
+                media_bug_close(psession);
                 break;
 
             case CONNECT_ERROR:
