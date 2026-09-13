@@ -259,7 +259,7 @@ private:
                 (private_t *)switch_core_media_bug_get_user_data(bug);
 
             if (tech_pvt) {
-                tech_pvt->close_requested = 1;
+                __atomic_store_n(&tech_pvt->close_requested, 1, __ATOMIC_RELAXED);
             }
         }
 

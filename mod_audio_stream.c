@@ -82,13 +82,16 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
             {
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Got SWITCH_ABC_TYPE_CLOSE.\n");
                 // Check if this is a normal channel closure or a requested closure
-                channel_closing = tech_pvt->close_requested ? 0 : 1;
+                const int close_requested = __atomic_load_n(&tech_pvt->close_requested, __ATOMIC_RELAXED);
+                channel_closing = close_requested ? 0 : 1;
                 stream_session_cleanup(session, NULL, channel_closing);
             }
             break;
 
         case SWITCH_ABC_TYPE_READ:
-            if (tech_pvt->close_requested) {
+            if (__atomic_load_n(
+                    &tech_pvt->close_requested,
+                    __ATOMIC_RELAXED)) {
                 return SWITCH_FALSE;
             }
             return stream_frame(bug);
