@@ -4,40 +4,47 @@
 
 Streams real-time audio between FreeSWITCH and external systems with correct lifecycle management, thread safety and predictable memory usage.
 
-### Update (22/2/2025)
+### 🚀 Major Release: Bi-Directional Streaming with Automatic Playback v1.1.0
 
-#### :rocket: **Introducing Bi-Directional Streaming with Automatic Playback**
+**mod_audio_stream v1.1.0** introduces major improvements to stream lifecycle,
+playback reliability, session safety, and stability under concurrent production workloads.
 
-A new version, **mod_audio_stream v1.0.3**, has been published, featuring raw binary audio streaming over WebSocket.
-It can be downloaded from the Releases section and is available as a pre-built Debian 12 package.
+**mod_audio_stream v1.1.0** is available from the [Releases](https://github.com/amigniter/mod_audio_stream/releases) section as pre-built [DEB](https://github.com/amigniter/mod_audio_stream/releases/download/v1.1.0/mod-audio-stream_1.1.0_amd64.deb) and [RPM](https://github.com/amigniter/mod_audio_stream/releases/download/v1.1.0/mod-audio-stream-1.1.0-1.el9.x86_64.rpm) packages (**Debian 13** and **Rocky Linux 9**).
 
-The playback feature allows continuous forward streaming while playback runs independently, enabling full-duplex audio between the caller and the WebSocket endpoint.
+Key improvements in **v1.1.0**:
 
-Key features:
+* Major stream lifecycle and thread-safe cleanup improvements
+* Improved handling of concurrent start, stop, pause, and channel teardown operations
+* Improved recovery after WebSocket connection and startup failures
+* Improved playback integration with the standard FreeSWITCH media pipeline
+* Native **`uuid_record`** support for recording caller audio and returned WebSocket audio in a single unified recording
+* Improved audio pipeline, resampling, and playback handling
+* Improved RAW binary streaming validation and safeguards
+* Improved stability and resource management under concurrent workloads
+* Updated playback and RAW binary streaming documentation
 
-- Full-duplex audio streaming (caller ↔ WebSocket)
-- Supports both base64-encoded and raw binary audio
-- Playback can be tracked, paused, and resumed dynamically
+The Bi-Directional edition provides full-duplex audio streaming between the caller and WebSocket endpoint and supports **base64-encoded and raw binary audio**, multiple returned audio formats including **PCMU, PCMA, L16/RAW, and Opus**, automatic resampling, and dynamic playback control.
 
-🔹 This release is a **commercial product**, available for free use (including commercial use) with a `limitation of 10 concurrent streaming channels`.
-For users requiring more than 10 channels, or access to the source code, please [contact us](mailto:amsoftswitch@gmail.com) for licensing options.
+🔹 The pre-built release is available for **free use, including commercial use**, with a limit of **10 concurrent streaming channels**.
+
+For deployments requiring more than 10 concurrent channels, source-code licensing, or an unlimited evaluation build, please [contact us](mailto:amsoftswitch@gmail.com).
+
+A **30-day evaluation version with no channel limitation** is also available for load, stability, and integration testing.
+
+See **README.playback.md** for playback API, audio formats, and configuration details.
 
 #### Why the Commercial Edition Exists
 
-The community edition of `mod_audio_stream` provides production-ready, uni-directional WebSocket audio streaming for ASR and real-time audio processing use cases.
-The commercial edition exists because real-world telephony systems require solving several non-trivial engineering problems that only appear under **real concurrency and production load**, such as:
+The Community Edition of `mod_audio_stream` provides lightweight, production-ready **uni-directional** WebSocket audio streaming and is well suited for ASR, transcription, analytics, and other real-time audio processing use cases.
 
-- correct FreeSWITCH session lifecycle management
-- thread-safe audio injection and shutdown
-- safe reconnection and cleanup under load
-- bounded and predictable memory usage
-- correct interaction with record_session / uuid_record
+Bi-directional telephony introduces additional challenges that become particularly important under concurrent production workloads: safe audio injection, playback timing, codec conversion and resampling, session lifecycle synchronization, concurrent API operations, channel teardown, and predictable resource usage.
 
-The commercial edition is designed and tested for **high-concurrency environments (thousands of simultaneous calls, 5000+)**, where correctness, stability and resource usage are critical.
+The commercial edition addresses these requirements with a dedicated playback and audio-processing pipeline, thread-safe lifecycle management, and extensive stability and load testing. It is intended for production systems where continuous full-duplex audio, predictable behavior, and reliable operation under high concurrency are required.
+
 
 ### About
 
-- The purpose of `mod_audio_stream` was to provide a simple, low-dependency yet effective module for streaming audio and receiving responses from a websocket server.
+- The purpose of `mod_audio_stream` is to provide a simple, low-dependency yet effective module for streaming audio and receiving responses from a websocket server.
 - Introduced [libwsc](https://github.com/amigniter/libwsc), our in-house, **RFC-6455 compliant** websocket client developed specifically for `mod_audio_stream`.
   - Replaces [ixwebsocket](https://machinezone.github.io/IXWebSocket/), which served us well for the past few years. `libwsc` is libevent-based, extremely lightweight, and optimized for low-latency audio streaming.
 - This module was inspired by mod_audio_fork.
