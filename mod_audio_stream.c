@@ -181,6 +181,18 @@ static switch_status_t start_capture(switch_core_session_t *session,
             SWITCH_LOG_WARNING,
             "WebSocket connection failed during stream startup.\n"
         );
+
+        private_t *tech_pvt =
+            (private_t *)switch_core_media_bug_get_user_data(bug);
+
+        if (tech_pvt) {
+            __atomic_store_n(
+                &tech_pvt->close_requested,
+                1,
+                __ATOMIC_RELAXED
+            );
+        }
+
         switch_core_media_bug_close(&bug, SWITCH_FALSE);
         return SWITCH_STATUS_FALSE;
     }
