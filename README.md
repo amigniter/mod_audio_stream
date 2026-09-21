@@ -9,7 +9,7 @@ Streams real-time audio between FreeSWITCH and external systems with correct lif
 **mod_audio_stream v1.1.0** introduces major improvements to stream lifecycle,
 playback reliability, session safety, and stability under concurrent production workloads.
 
-**mod_audio_stream v1.1.0** is available from the [Releases](https://github.com/amigniter/mod_audio_stream/releases) section as pre-built [DEB](https://github.com/amigniter/mod_audio_stream/releases/download/v1.1.0/mod-audio-stream_1.1.0_amd64.deb) and [RPM](https://github.com/amigniter/mod_audio_stream/releases/download/v1.1.0/mod-audio-stream-1.1.0-1.el9.x86_64.rpm) packages (**Debian 13** and **Rocky Linux 9**).
+It is available from the [Releases](https://github.com/amigniter/mod_audio_stream/releases) section as pre-built [DEB](https://github.com/amigniter/mod_audio_stream/releases/download/v1.1.0/mod-audio-stream_1.1.0_amd64.deb) and [RPM](https://github.com/amigniter/mod_audio_stream/releases/download/v1.1.0/mod-audio-stream-1.1.0-1.el9.x86_64.rpm) packages (**Debian 13** and **Rocky Linux 9**).
 
 Key improvements in **v1.1.0**:
 
@@ -24,6 +24,17 @@ Key improvements in **v1.1.0**:
 * Updated playback and RAW binary streaming documentation
 
 The Bi-Directional edition provides full-duplex audio streaming between the caller and WebSocket endpoint and supports **base64-encoded and raw binary audio**, multiple returned audio formats including **PCMU, PCMA, L16/RAW, and Opus**, automatic resampling, and dynamic playback control.
+
+> **Named Pipe Audio Output** can expose return/playback audio through a local named pipe (FIFO) as raw PCM16 audio in real time. The output sample rate can follow the FreeSWITCH channel rate or be independently resampled to 8, 16, 24, 32, or 48 kHz. This allows external applications to consume the audio directly for recording, monitoring, DSP, analytics, transcoding, or integration with other local audio pipelines — __without interfering with normal caller playback__.
+
+Connect the live return audio directly to tools such as FFmpeg, aplay, or any local audio processing pipeline:
+```text
+uuid_audio_stream <uuid> pipe start /tmp/audio.pipe 16000
+```
+
+```bash
+ffmpeg -f s16le -ar 16000 -ac 1 -i /tmp/audio.pipe ...
+```
 
 🔹 The pre-built release is available for **free use, including commercial use**, with a limit of **10 concurrent streaming channels**.
 
