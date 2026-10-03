@@ -1,0 +1,14 @@
+mod_audio_stream - FreeSWITCH Linking Exception
+
+Copyright (C) 2026 AMSOFTSWITCH LTD
+
+Additional permission under GNU AGPL version 3 section 7:
+
+You may link or combine mod_audio_stream with FreeSWITCH
+(or a modified version of FreeSWITCH) and convey the resulting work.
+
+This exception applies only to linking or combining mod_audio_stream
+with FreeSWITCH.
+
+Except for this additional permission, the GNU Affero General Public
+License version 3 continues to apply.

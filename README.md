@@ -4,54 +4,15 @@
 
 Streams real-time audio between FreeSWITCH and external systems with correct lifecycle management, thread safety and predictable memory usage.
 
-### 🚀 Major Release: Bi-Directional Streaming with Automatic Playback v1.1.0
+### Editions
 
-**mod_audio_stream v1.1.0** introduces major improvements to stream lifecycle,
-playback reliability, session safety, and stability under concurrent production workloads.
+This repository contains the open-source Community Edition of `mod_audio_stream`.
 
-It is available from the [Releases](https://github.com/amigniter/mod_audio_stream/releases) section as pre-built [DEB](https://github.com/amigniter/mod_audio_stream/releases/download/v1.1.0/mod-audio-stream_1.1.0_amd64.deb) and [RPM](https://github.com/amigniter/mod_audio_stream/releases/download/v1.1.0/mod-audio-stream-1.1.0-1.el9.x86_64.rpm) packages (**Debian 13** and **Rocky Linux 9**).
+A commercial **v1.1.0** with bi-directional audio streaming and additional
+production features is also available.
 
-Key improvements in **v1.1.0**:
-
-* Major stream lifecycle and thread-safe cleanup improvements
-* Improved handling of concurrent start, stop, pause, and channel teardown operations
-* Improved recovery after WebSocket connection and startup failures
-* Improved playback integration with the standard FreeSWITCH media pipeline
-* Native **`uuid_record`** support for recording caller audio and returned WebSocket audio in a single unified recording
-* Improved audio pipeline, resampling, and playback handling
-* Improved RAW binary streaming validation and safeguards
-* Improved stability and resource management under concurrent workloads
-* Updated playback and RAW binary streaming documentation
-
-The Bi-Directional edition provides full-duplex audio streaming between the caller and WebSocket endpoint and supports **base64-encoded and raw binary audio**, multiple returned audio formats including **PCMU, PCMA, L16/RAW, and Opus**, automatic resampling, and dynamic playback control.
-
-> **Named Pipe Audio Output** can expose return/playback audio through a local named pipe (FIFO) as raw PCM16 audio in real time. The output sample rate can follow the FreeSWITCH channel rate or be independently resampled to 8, 16, 24, 32, or 48 kHz. This allows external applications to consume the audio directly for recording, monitoring, DSP, analytics, transcoding, or integration with other local audio pipelines — __without interfering with normal caller playback__.
-
-Connect the live return audio directly to tools such as FFmpeg, aplay, or any local audio processing pipeline:
-```text
-uuid_audio_stream <uuid> pipe start /tmp/audio.pipe 16000
-```
-
-```bash
-ffmpeg -f s16le -ar 16000 -ac 1 -i /tmp/audio.pipe ...
-```
-
-🔹 The pre-built release is available for **free use, including commercial use**, with a limit of **10 concurrent streaming channels**.
-
-For deployments requiring more than 10 concurrent channels, source-code licensing, or an unlimited evaluation build, please [contact us](mailto:amsoftswitch@gmail.com).
-
-A **30-day evaluation version with no channel limitation** is also available for load, stability, and integration testing.
-
-See **README.playback.md** for playback API, audio formats, and configuration details.
-
-#### Why the Commercial Edition Exists
-
-The Community Edition of `mod_audio_stream` provides lightweight, production-ready **uni-directional** WebSocket audio streaming and is well suited for ASR, transcription, analytics, and other real-time audio processing use cases.
-
-Bi-directional telephony introduces additional challenges that become particularly important under concurrent production workloads: safe audio injection, playback timing, codec conversion and resampling, session lifecycle synchronization, concurrent API operations, channel teardown, and predictable resource usage.
-
-The commercial edition addresses these requirements with a dedicated playback and audio-processing pipeline, thread-safe lifecycle management, and extensive stability and load testing. It is intended for production systems where continuous full-duplex audio, predictable behavior, and reliable operation under high concurrency are required.
-
+- [Commercial Releases](https://github.com/amigniter/mod_audio_stream/releases)
+- [Contact](mailto:amsoftswitch@gmail.com)
 
 ### About
 
@@ -286,3 +247,18 @@ Both the public and commercial editions of **mod_audio_stream** are developed en
 
 The mod_audio_stream source code contains no third-party source code or bundled third-party dependencies.
 It relies only on external system and FreeSWITCH libraries, which remain subject to their respective licenses.
+
+### License
+
+Starting with version **1.0.1**, the Community Edition of
+**mod_audio_stream** is licensed under the
+**GNU Affero General Public License v3.0 (AGPL-3.0-only)**,
+with an additional linking exception for FreeSWITCH.
+
+Earlier Community Edition releases remain available under
+the license terms under which they were originally released.
+
+Commercial licensing is available separately.
+
+See [LICENSE](LICENSE) and [LICENSE_EXCEPTION](LICENSE_EXCEPTION)
+for details.

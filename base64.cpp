@@ -1,8 +1,9 @@
 /*
- * base64.cpp
+ * mod_audio_stream
+ * Copyright (C) 2026 AMSOFTSWITCH LTD
  *
- * Copyright (c) 2026 AMSOFTSWITCH LTD.
- * All rights reserved.
+ * Licensed under the GNU Affero General Public License v3.0 only.
+ * See LICENSE and LICENSE_EXCEPTION for licensing terms.
  */
 
 #include "base64.h"

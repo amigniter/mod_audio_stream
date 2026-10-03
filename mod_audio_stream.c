@@ -1,5 +1,9 @@
 /*
  * mod_audio_stream FreeSWITCH module to stream audio to websocket and receive response
+ * Copyright (C) 2026 AMSOFTSWITCH LTD
+ *
+ * Licensed under the GNU Affero General Public License v3.0 only.
+ * See LICENSE and LICENSE_EXCEPTION for licensing terms.
  */
 #include "mod_audio_stream.h"
 #include "audio_streamer_glue.h"

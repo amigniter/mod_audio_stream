@@ -1,3 +1,16 @@
+mod-audio-stream (1.0.1) UNRELEASED; urgency=medium
+
+  * Change Community Edition license to GNU AGPL v3.
+  * Add FreeSWITCH linking exception.
+  * Add synchronized per-session stream lifecycle state management.
+  * Prevent concurrent start and cleanup race conditions.
+  * Improve media bug failure and channel hangup cleanup.
+  * Ensure initial metadata precedes streamed audio frames.
+  * Fix initial metadata argument validation.
+  * Update libwsc with WebSocket protocol, security and lifecycle hardening.
+
+ -- Milan M. <amsoftswitch@gmail.com>  Sat, 03 Oct 2026 13:43:00 +0200
+
 mod-audio-stream (1.0.0-4) UNRELEASED; urgency=medium
 
   * Add synchronized per-session stream lifecycle state management.
