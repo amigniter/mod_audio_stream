@@ -4,6 +4,9 @@
 
 Streams real-time audio between FreeSWITCH and external systems with correct lifecycle management, thread safety and predictable memory usage.
 
+> **Looking for native realtime AI integration for FreeSWITCH?**  
+> Check out [mod_realtime_ai](https://modrealtime.ai/) — native realtime speech-to-speech integration for OpenAI Realtime, Google Gemini, ElevenLabs Agents, and Azure Voice Live.
+
 ### Editions
 
 This repository contains the open-source Community Edition of `mod_audio_stream`.
