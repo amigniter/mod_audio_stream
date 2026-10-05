@@ -11,8 +11,7 @@ Streams real-time audio between FreeSWITCH and external systems with correct lif
 
 This repository contains the open-source Community Edition of `mod_audio_stream`.
 
-A commercial **v1.1.0** with bi-directional audio streaming and additional
-production features is also available.
+Commercial **v1.1.0** adds bi-directional audio streaming, bridged-call playback and mixing, Named Pipe audio output, and other production features.
 
 - [Commercial Releases](https://github.com/amigniter/mod_audio_stream/releases)
 - [Contact](mailto:amsoftswitch@gmail.com)
