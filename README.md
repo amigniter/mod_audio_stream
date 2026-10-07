@@ -25,6 +25,37 @@ Commercial **v1.1.0** adds bi-directional audio streaming, bridged-call playback
 
 ## Installation
 
+### Official APT Repository
+
+Prebuilt Community Edition packages for Debian 12 (Bookworm) and
+Debian 13 (Trixie) are available from the official ModRealtime APT repository.
+
+FreeSWITCH must be installed from the official SignalWire FreeSWITCH
+APT repository.
+
+Add the ModRealtime repository signing key:
+
+```bash
+curl -fsSL https://packages.modrealtime.ai/modrealtime-archive-keyring.gpg \
+  | sudo tee /usr/share/keyrings/modrealtime-archive-keyring.gpg >/dev/null
+```
+
+Add the repository for your Debian release:
+
+```bash
+. /etc/os-release
+
+echo "deb [signed-by=/usr/share/keyrings/modrealtime-archive-keyring.gpg] https://packages.modrealtime.ai ${VERSION_CODENAME} main" \
+  | sudo tee /etc/apt/sources.list.d/modrealtime.list
+
+sudo apt update
+```
+
+Install `mod_audio_stream`:
+```bash
+sudo apt install mod-audio-stream
+```
+
 ### Dependencies
 It requires `libfreeswitch-dev`, `libssl-dev`, `zlib1g-dev`, `libevent-dev` and `libspeexdsp-dev` on Debian/Ubuntu which are regular packages for Freeswitch installation.
 ### Building
