@@ -4,8 +4,15 @@
 
 Streams real-time audio between FreeSWITCH and external systems with correct lifecycle management, thread safety and predictable memory usage.
 
-> **Looking for native realtime AI integration for FreeSWITCH?**  
-> Check out [mod_realtime_ai](https://modrealtime.ai/) — native realtime speech-to-speech integration for OpenAI Realtime, Google Gemini, ElevenLabs Agents, and Azure Voice Live.
+> **Looking for realtime Voice AI integration?**
+>
+> - **[mod_realtime_ai](https://modrealtime.ai/)** — Native FreeSWITCH
+>   speech-to-speech integration with OpenAI Realtime, Google Gemini,
+>   ElevenLabs Agents, and Azure Voice Live.
+>
+> - **[SIP Realtime AI Gateway](https://modrealtime.ai/sip-realtime-ai)** —
+>   Standalone SIP/RTP-to-AI integration. Connect SIP endpoints directly
+>   to realtime AI providers without requiring FreeSWITCH or another PBX.
 
 ### Editions
 
